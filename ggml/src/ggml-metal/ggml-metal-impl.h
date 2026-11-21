@@ -726,6 +726,18 @@ typedef struct {
 } ggml_metal_kargs_l2_clip;
 
 typedef struct {
+    int32_t  ne0;
+    int32_t  ne1;
+    int32_t  ne2;
+    uint64_t nbg1;
+    uint64_t nbg2;
+    uint64_t nbu1;
+    uint64_t nbu2;
+    float    b;
+    float    lb;
+} ggml_metal_kargs_situ;
+
+typedef struct {
     int32_t  IC;
     int32_t  IH;
     int32_t  IW;

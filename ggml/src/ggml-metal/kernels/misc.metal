@@ -511,6 +511,35 @@ typedef decltype(kernel_count_equal<int32_t>) kernel_count_equal_t;
 
 template [[host_name("kernel_count_equal_i32")]] kernel kernel_count_equal_t kernel_count_equal<int32_t>;
 
+// y = b*tanh(g/b)*sigmoid(g) * lb*tanh(u/lb); g, u strided views with contiguous rows, y contiguous
+kernel void kernel_situ_f32(
+        constant ggml_metal_kargs_situ & args,
+        device const char  * g,
+        device const char  * u,
+        device       float * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort3 tpitg3 [[thread_position_in_threadgroup]],
+        ushort3 ntg3   [[threads_per_threadgroup]]) {
+    const int i1 = tgpig.y;
+    const int i2 = tgpig.z;
+    const int tpitg = tpitg3.x;
+    const int ntg   = ntg3.x;
+
+    device const float * gr = (device const float *) (g + i1*args.nbg1 + i2*args.nbg2);
+    device const float * ur = (device const float *) (u + i1*args.nbu1 + i2*args.nbu2);
+    device       float * yr = dst + ((int64_t) i2*args.ne1 + i1)*args.ne0;
+
+    const int i0 = tgpig.x*ntg + tpitg;
+    if (i0 >= args.ne0) {
+        return;
+    }
+
+    const float gv  = gr[i0];
+    const float uv  = ur[i0];
+    const float act = args.b*precise::tanh(gv/args.b) * (1.0f/(1.0f + precise::exp(-gv)));
+    yr[i0] = act * (args.lb*precise::tanh(uv/args.lb));
+}
+
 // one simdgroup per row: y = x' * clamp(t / (|x'| + eps), 0, 1), x' = x * s[row % ne01] when a scale is bound
 kernel void kernel_l2_clip_f32(
         constant ggml_metal_kargs_l2_clip & args,

@@ -869,6 +869,60 @@ static const std::vector<ggml_op> ops_l2_clip = {
     GGML_OP_SQR, GGML_OP_SUM_ROWS, GGML_OP_SQRT, GGML_OP_SCALE, GGML_OP_FILL, GGML_OP_DIV, GGML_OP_CLAMP, GGML_OP_MUL
 };
 
+static const std::vector<ggml_op> ops_situ = {
+    GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE, GGML_OP_MUL
+};
+
+// scale(g, 1/b) tanh scale(b) | sigmoid(g) | mul | scale(u, 1/lb) tanh scale(lb) | mul
+static bool ggml_metal_fusion_check_situ(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * n,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(mode);
+
+    {
+        int out = node_idxs[idx + 8];
+        if (!ggml_can_fuse_subgraph_ext(gf, node_idxs + idx, 9, fusion->ops.data(), &out, 1)) {
+            return false;
+        }
+    }
+
+    const ggml_tensor * g = n[0]->src[0];
+    const ggml_tensor * u = n[5]->src[0];
+
+    const auto is_unary = [](const ggml_tensor * t, ggml_unary_op op) {
+        return t->op == GGML_OP_UNARY && ggml_get_unary_op(t) == op;
+    };
+    const auto scale_s = [](const ggml_tensor * t) { return ((const float *) t->op_params)[0]; };
+    const auto scale_b = [](const ggml_tensor * t) { return ((const float *) t->op_params)[1]; };
+
+    if (!is_unary(n[1], GGML_UNARY_OP_TANH) || !is_unary(n[3], GGML_UNARY_OP_SIGMOID) || !is_unary(n[6], GGML_UNARY_OP_TANH)) {
+        return false;
+    }
+    if (n[1]->src[0] != n[0] || n[2]->src[0] != n[1] || n[3]->src[0] != g ||
+        !((n[4]->src[0] == n[2] && n[4]->src[1] == n[3]) || (n[4]->src[0] == n[3] && n[4]->src[1] == n[2])) ||
+        n[6]->src[0] != n[5] || n[7]->src[0] != n[6] ||
+        !((n[8]->src[0] == n[4] && n[8]->src[1] == n[7]) || (n[8]->src[0] == n[7] && n[8]->src[1] == n[4]))) {
+        return false;
+    }
+    for (int i : {0, 2, 5, 7}) {
+        if (scale_b(n[i]) != 0.0f) {
+            return false;
+        }
+    }
+    const float b = scale_s(n[2]), lb = scale_s(n[7]);
+    if (b <= 0.0f || lb <= 0.0f || fabsf(scale_s(n[0])*b - 1.0f) > 1e-6f || fabsf(scale_s(n[5])*lb - 1.0f) > 1e-6f) {
+        return false;
+    }
+
+    return g->type == GGML_TYPE_F32 && u->type == GGML_TYPE_F32 && n[8]->type == GGML_TYPE_F32 &&
+        ggml_are_same_shape(g, u) && ggml_are_same_shape(g, n[8]) && g->ne[3] == 1 &&
+        g->nb[0] == sizeof(float) && u->nb[0] == sizeof(float) && ggml_is_contiguous(n[8]);
+}
+
 // y = x' * clamp(t / (sqrt(sum_rows(x'^2)) + eps), 0, 1), x' = x or x * s (s broadcast over dims 2, 3)
 static bool ggml_metal_fusion_check_l2_clip(
         const ggml_metal_fusion       * fusion,
@@ -983,6 +1037,8 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
 
     { GGML_METAL_FUSION_L2_CLIP, ops_l2_clip_scaled, {}, true, ggml_metal_fusion_check_l2_clip },
     { GGML_METAL_FUSION_L2_CLIP, ops_l2_clip,        {}, true, ggml_metal_fusion_check_l2_clip },
+
+    { GGML_METAL_FUSION_SITU, ops_situ, {}, true, ggml_metal_fusion_check_situ },
 };
 
 // ---- alloc deps -----------------------------------------------------------
