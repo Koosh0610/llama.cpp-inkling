@@ -560,6 +560,86 @@ typedef decltype(kernel_loop_ctrl<half>)  kernel_loop_ctrl_f16_t;
 template [[host_name("kernel_loop_ctrl_f32")]] kernel kernel_loop_ctrl_f32_t kernel_loop_ctrl<float>;
 template [[host_name("kernel_loop_ctrl_f16")]] kernel kernel_loop_ctrl_f16_t kernel_loop_ctrl<half>;
 
+// one token, threadgroup q of 1024 threads: states = [pre (K - 1 normed rows), rms_norm(cur)],
+// w = softmax(scale*states q), dst[:, q] = states w
+kernel void kernel_mix_f32(
+        constant ggml_metal_kargs_mix & args,
+        device const float * cur,
+        device const float * pre,
+        device const float * q,
+        device       float * dst,
+        uint    tgpig [[threadgroup_position_in_grid]],
+        ushort  tpitg [[thread_position_in_threadgroup]],
+        ushort  tiisg [[thread_index_in_simdgroup]],
+        ushort  sgitg [[simdgroup_index_in_threadgroup]]) {
+    constexpr int KMAX = 16;
+    threadgroup float red[32][KMAX + 1];
+    threadgroup float wts[KMAX + 1];
+
+    const int C = args.C;
+    const int K = args.K;
+    device const float * qr = q + (int64_t) tgpig*C;
+
+    float acc[KMAX + 1];
+    for (int k = 0; k <= KMAX; ++k) {
+        acc[k] = 0.0f;
+    }
+    for (int c = tpitg; c < C; c += 1024) {
+        const float qv = qr[c];
+        const float cv = cur[c];
+        for (int k = 0; k < K - 1; ++k) {
+            acc[k] += pre[(int64_t) k*C + c]*qv;
+        }
+        acc[K - 1] += cv*qv;
+        acc[KMAX]  += cv*cv;
+    }
+    for (int k = 0; k <= KMAX; ++k) {
+        const float v = simd_sum(acc[k]);
+        if (tiisg == 0) {
+            red[sgitg][k] = v;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        for (int k = 0; k <= KMAX; ++k) {
+            const float v = simd_sum(red[tiisg][k]);
+            if (tiisg == 0) {
+                wts[k] = v;
+            }
+        }
+        if (tiisg == 0) {
+            const float rn = 1.0f/sqrt(wts[KMAX]/C + args.eps);
+            wts[K - 1] *= rn;
+            float mx = -INFINITY;
+            for (int k = 0; k < K; ++k) {
+                wts[k] *= args.scale;
+                mx = max(mx, wts[k]);
+            }
+            float sum = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                wts[k] = exp(wts[k] - mx);
+                sum += wts[k];
+            }
+            for (int k = 0; k < K; ++k) {
+                wts[k] /= sum;
+            }
+            wts[KMAX] = rn;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float rn = wts[KMAX];
+    device float * dr = dst + (int64_t) tgpig*C;
+    for (int c = tpitg; c < C; c += 1024) {
+        float v = wts[K - 1]*cur[c]*rn;
+        for (int k = 0; k < K - 1; ++k) {
+            v += wts[k]*pre[(int64_t) k*C + c];
+        }
+        dr[c] = v;
+    }
+}
+
 // y[c, t] = (cur[c, t] + sum_k w[c, k]*x[c, t + k])*scale; thread (c, 0) also stores channel c of the conv state
 kernel void kernel_conv_res_f32(
         constant ggml_metal_kargs_conv_res & args,

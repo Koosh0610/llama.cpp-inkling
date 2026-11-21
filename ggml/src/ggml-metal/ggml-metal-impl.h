@@ -746,6 +746,13 @@ typedef struct {
 } ggml_metal_kargs_loop_ctrl;
 
 typedef struct {
+    int32_t  C;     // channels
+    int32_t  K;     // states including cur
+    float    eps;
+    float    scale; // softmax scale
+} ggml_metal_kargs_mix;
+
+typedef struct {
     int32_t  C;       // channels
     int32_t  T;       // tokens
     int32_t  K;       // conv taps
