@@ -313,7 +313,19 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
 
     // TODO: the in-graph chain is greedy (argmax); sampling params affect only the final
     //       token pick, not the Markov conditioning path
+    // positions past the drafts the caller reads skip the Markov step (and its full-vocab head) and pass the batched logits
+    const char * steps_env = getenv("LLAMA_DSPARK_MARKOV_STEPS");
+    const int64_t markov_steps = steps_env ? atoll(steps_env) : block_drafts;
     for (int64_t i = i_draft_beg; i < block_drafts; ++i) {
+        if (i >= i_draft_beg + markov_steps) {
+            ggml_tensor * base_i = ggml_cont(ctx0, ggml_view_2d(ctx0, base, n_vocab, n_blocks, base_stride, i*base->nb[1]));
+            cat = cat ? ggml_concat(ctx0, cat, base_i, 1) : base_i;
+            if (has_conf) {
+                ggml_tensor * pad = ggml_sigmoid(ctx0, ggml_view_2d(ctx0, base, 1, n_blocks, base_stride, i*base->nb[1]));
+                cat_conf = cat_conf ? ggml_concat(ctx0, cat_conf, pad, 1) : pad;
+            }
+            continue;
+        }
         ggml_tensor * w1_prev = ggml_get_rows(ctx0, w1, prev); // [R, n_blocks]
         ggml_tensor * markov  = w1_prev;
 
@@ -1077,7 +1089,14 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
     auto * tie_rank = ggml_arange(ctx0, 0, hparams.n_vocab_unpadded, 1);
     tie_rank = ggml_scale_bias(ctx0, tie_rank, -1.0f, hparams.n_vocab_unpadded);
     auto * prev = ids;
+    // positions past the drafts the caller reads skip the head (a full-vocab matmul each) and pass the batched logits
+    const char * steps_env = getenv("LLAMA_DSPARK_MARKOV_STEPS");
+    const int64_t markov_steps = steps_env ? atoll(steps_env) : block;
     for (int64_t i = 1; i < block; ++i) {
+        if (i > markov_steps) {
+            logits = ggml_concat(ctx0, logits, column(base, i), 1);
+            continue;
+        }
         auto * col = build_inkling2_head(*this, model, *target, prev, state, column(cur, i), column(base, i), context);
         logits = ggml_concat(ctx0, logits, col, 1);
         // Select the first maximum, independent of backend argmax tie order.
