@@ -716,6 +716,16 @@ typedef struct {
 } ggml_metal_kargs_snake;
 
 typedef struct {
+    int32_t ne00;      // row length
+    int32_t ne01;      // rows per scale period (scale row = row % ne01)
+    int32_t s_ne1;     // scale rows (ne01 or 1), 0 without a scale
+    int32_t nsg;       // simdgroups per threadgroup, one row each
+    int64_t nrows;
+    float   threshold;
+    float   eps;
+} ggml_metal_kargs_l2_clip;
+
+typedef struct {
     int32_t  IC;
     int32_t  IH;
     int32_t  IW;

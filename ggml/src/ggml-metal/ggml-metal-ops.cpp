@@ -821,6 +821,15 @@ int ggml_metal_op_acc(ggml_metal_op_t ctx, int idx) {
 int ggml_metal_op_unary(ggml_metal_op_t ctx, int idx) {
     ggml_tensor * op = ctx->node(idx);
 
+    if (op->op == GGML_OP_SQR && ctx->use_fusion()) {
+        int n = 1;
+        const ggml_metal_fusion * fusion = ctx->can_fuse(idx, GGML_METAL_FUSION_FULL, &n);
+        if (fusion && ggml_metal_fusion_get_id(fusion) == GGML_METAL_FUSION_L2_CLIP) {
+            ctx->count_fusions(fusion);
+            return ggml_metal_op_l2_clip_fused(ctx, idx, n);
+        }
+    }
+
     // the sigmoid and sqrt(softplus) TOPK_MOE fusions anchor at the gating unary node
     if (op->op == GGML_OP_UNARY && ctx->use_fusion() &&
         (ggml_get_unary_op(op) == GGML_UNARY_OP_SOFTPLUS || ggml_get_unary_op(op) == GGML_UNARY_OP_SIGMOID)) {
@@ -4359,6 +4368,11 @@ int ggml_metal_op_bin(ggml_metal_op_t ctx, int idx) {
         fusion = ctx->can_fuse(idx, GGML_METAL_FUSION_FULL, &n);
         n_fuse = n;
 
+        if (fusion && ggml_metal_fusion_get_id(fusion) == GGML_METAL_FUSION_L2_CLIP) {
+            ctx->count_fusions(fusion);
+            return ggml_metal_op_l2_clip_fused(ctx, idx, n_fuse);
+        }
+
         // snake activation autofuse: mul -> sin -> sqr -> mul -> add
         if (fusion && ggml_metal_fusion_get_id(fusion) == GGML_METAL_FUSION_SNAKE) {
             ctx->count_fusions(fusion);
@@ -5368,6 +5382,58 @@ int ggml_metal_op_col2im_1d(ggml_metal_op_t ctx, int idx) {
 
 // Dispatch the fused snake kernel from the matched mul -> sin -> sqr -> mul -> add chain.
 // idx points at the leading mul. The caller has validated the chain.
+// n matched nodes: 9 with a leading per-channel scale mul, 8 without
+int ggml_metal_op_l2_clip_fused(ggml_metal_op_t ctx, int idx, int n) {
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    const bool scaled = n == 9;
+    const int  o      = scaled ? 1 : 0;
+
+    const ggml_tensor * n0   = ctx->node(idx);
+    const ggml_tensor * sc   = ctx->node(idx + o + 3);
+    const ggml_tensor * fill = ctx->node(idx + o + 4);
+    ggml_tensor       * dst  = ctx->node(idx + n - 1);
+
+    const ggml_tensor * x = n0->src[0];
+    const ggml_tensor * s = nullptr;
+    if (scaled) {
+        x = ggml_are_same_shape(n0, n0->src[0]) ? n0->src[0] : n0->src[1];
+        s = x == n0->src[0] ? n0->src[1] : n0->src[0];
+    }
+
+    for (int i = 1; i < n; ++i) {
+        if (!ggml_metal_op_concurrency_check(ctx, ctx->node(idx + i))) {
+            ggml_metal_op_concurrency_reset(ctx);
+            break;
+        }
+    }
+
+    const int nsg = 4;
+
+    ggml_metal_kargs_l2_clip args = {
+        /*.ne00      =*/ (int32_t) x->ne[0],
+        /*.ne01      =*/ (int32_t) x->ne[1],
+        /*.s_ne1     =*/ s ? (int32_t) s->ne[1] : 0,
+        /*.nsg       =*/ nsg,
+        /*.nrows     =*/ ggml_nrows(x),
+        /*.threshold =*/ ((const float *) fill->op_params)[0],
+        /*.eps       =*/ ((const float *) sc->op_params)[1],
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_l2_clip(lib);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(x),         1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(s ? s : x), 2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(dst),       3);
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, (args.nrows + nsg - 1)/nsg, 1, 1, 32, nsg, 1);
+
+    return n;
+}
+
 int ggml_metal_op_snake_fused(ggml_metal_op_t ctx, int idx) {
     ggml_metal_library_t lib = ctx->lib;
     ggml_metal_encoder_t enc = ctx->enc;

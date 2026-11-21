@@ -862,6 +862,75 @@ static const std::vector<ggml_op> ops_moe_reduce_8 = {
 
 static const std::vector<ggml_op> ops_mul_mat_add = { GGML_OP_MUL_MAT, GGML_OP_ADD };
 
+static const std::vector<ggml_op> ops_l2_clip_scaled = {
+    GGML_OP_MUL, GGML_OP_SQR, GGML_OP_SUM_ROWS, GGML_OP_SQRT, GGML_OP_SCALE, GGML_OP_FILL, GGML_OP_DIV, GGML_OP_CLAMP, GGML_OP_MUL
+};
+static const std::vector<ggml_op> ops_l2_clip = {
+    GGML_OP_SQR, GGML_OP_SUM_ROWS, GGML_OP_SQRT, GGML_OP_SCALE, GGML_OP_FILL, GGML_OP_DIV, GGML_OP_CLAMP, GGML_OP_MUL
+};
+
+// y = x' * clamp(t / (sqrt(sum_rows(x'^2)) + eps), 0, 1), x' = x or x * s (s broadcast over dims 2, 3)
+static bool ggml_metal_fusion_check_l2_clip(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * nodes,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(mode);
+
+    // the chain reduces rows, so it bypasses the same-shape chain rule (unsafe): run the structural
+    // subgraph check here so no intermediate is read outside the chain
+    {
+        const int n_ops = (int) fusion->ops.size();
+        int out = node_idxs[idx + n_ops - 1];
+        if (!ggml_can_fuse_subgraph_ext(gf, node_idxs + idx, n_ops, fusion->ops.data(), &out, 1)) {
+            return false;
+        }
+    }
+
+    const bool scaled = fusion->ops.size() == ops_l2_clip_scaled.size();
+    const int  o      = scaled ? 1 : 0;
+
+    const ggml_tensor * sqr   = nodes[o + 0];
+    const ggml_tensor * sum   = nodes[o + 1];
+    const ggml_tensor * sqrt_ = nodes[o + 2];
+    const ggml_tensor * sc    = nodes[o + 3];
+    const ggml_tensor * fill  = nodes[o + 4];
+    const ggml_tensor * div   = nodes[o + 5];
+    const ggml_tensor * clamp = nodes[o + 6];
+    const ggml_tensor * mul   = nodes[o + 7];
+
+    // x' is the clipped input: the leading mul, or the sqr source
+    const ggml_tensor * xs = scaled ? nodes[0] : sqr->src[0];
+    const ggml_tensor * x  = xs;
+    const ggml_tensor * s  = nullptr;
+    if (scaled) {
+        const ggml_tensor * m = nodes[0];
+        x = ggml_are_same_shape(m, m->src[0]) ? m->src[0] : m->src[1];
+        s = x == m->src[0] ? m->src[1] : m->src[0];
+        if (!ggml_are_same_shape(m, x) || s->type != GGML_TYPE_F32 || !ggml_is_contiguous(s) ||
+            s->ne[0] != x->ne[0] || (s->ne[1] != x->ne[1] && s->ne[1] != 1) || s->ne[2] != 1 || s->ne[3] != 1) {
+            return false;
+        }
+    }
+
+    if (sqr->src[0] != xs || sum->src[0] != sqr || sqrt_->src[0] != sum || sc->src[0] != sqrt_ ||
+        fill->src[0] != sc || div->src[0] != fill || div->src[1] != sc || clamp->src[0] != div ||
+        mul->src[0] != xs || mul->src[1] != clamp) {
+        return false;
+    }
+
+    const float * p_sc    = (const float *) sc->op_params;
+    const float * p_clamp = (const float *) clamp->op_params;
+    if (p_sc[0] != 1.0f || p_clamp[0] != 0.0f || p_clamp[1] != 1.0f) {
+        return false;
+    }
+
+    return x->type == GGML_TYPE_F32 && xs->type == GGML_TYPE_F32 && mul->type == GGML_TYPE_F32 &&
+        ggml_is_contiguous(x) && ggml_is_contiguous(mul) && ggml_are_same_shape(x, mul);
+}
+
 static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
     { GGML_METAL_FUSION_NORM_MUL,     ops_norm_mul,         {}, false, ggml_metal_fusion_check_norm },
     { GGML_METAL_FUSION_NORM_MUL_ADD, ops_norm_mul_add,     {}, false, ggml_metal_fusion_check_norm },
@@ -911,6 +980,9 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
     { GGML_METAL_FUSION_SSM_CONV_SILU, ops_ssm_conv_silu, {}, false, ggml_metal_fusion_check_ssm_conv_silu },
 
     { GGML_METAL_FUSION_MUL_MAT_ADD, ops_mul_mat_add, {}, false, ggml_metal_fusion_check_mul_mat_add },
+
+    { GGML_METAL_FUSION_L2_CLIP, ops_l2_clip_scaled, {}, true, ggml_metal_fusion_check_l2_clip },
+    { GGML_METAL_FUSION_L2_CLIP, ops_l2_clip,        {}, true, ggml_metal_fusion_check_l2_clip },
 };
 
 // ---- alloc deps -----------------------------------------------------------

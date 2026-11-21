@@ -511,6 +511,39 @@ typedef decltype(kernel_count_equal<int32_t>) kernel_count_equal_t;
 
 template [[host_name("kernel_count_equal_i32")]] kernel kernel_count_equal_t kernel_count_equal<int32_t>;
 
+// one simdgroup per row: y = x' * clamp(t / (|x'| + eps), 0, 1), x' = x * s[row % ne01] when a scale is bound
+kernel void kernel_l2_clip_f32(
+        constant ggml_metal_kargs_l2_clip & args,
+        device const float * x,
+        device const float * s,
+        device       float * dst,
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const int64_t row = (int64_t) tgpig*args.nsg + sgitg;
+    if (row >= args.nrows) {
+        return;
+    }
+
+    device const float * xr = x   + row*args.ne00;
+    device       float * yr = dst + row*args.ne00;
+    device const float * sr = args.s_ne1 > 0 ? s + (args.s_ne1 > 1 ? row % args.ne01 : 0)*args.ne00 : nullptr;
+
+    float acc = 0.0f;
+    for (int i = tiisg; i < args.ne00; i += 32) {
+        const float v = sr ? xr[i]*sr[i] : xr[i];
+        acc += v*v;
+    }
+
+    const float norm = sqrt(simd_sum(acc)) + args.eps;
+    const float f    = clamp(args.threshold/norm, 0.0f, 1.0f);
+
+    for (int i = tiisg; i < args.ne00; i += 32) {
+        const float v = sr ? xr[i]*sr[i] : xr[i];
+        yr[i] = v*f;
+    }
+}
+
 template <typename T>
 kernel void kernel_snake(
         constant ggml_metal_kargs_snake & args,
