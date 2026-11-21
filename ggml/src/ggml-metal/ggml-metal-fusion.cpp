@@ -919,7 +919,7 @@ static bool ggml_metal_fusion_check_loop_ctrl(
     const int64_t C = wf->ne[1];
     const int64_t T = x->ne[1];
 
-    return wf->type == GGML_TYPE_F32 && wg->type == GGML_TYPE_F32 && ggml_are_same_shape(wf, wg) &&
+    return (wf->type == GGML_TYPE_F32 || wf->type == GGML_TYPE_F16) && wg->type == wf->type && ggml_are_same_shape(wf, wg) &&
         ggml_is_contiguous(wf) && ggml_is_contiguous(wg) && R <= 256 && R % 4 == 0 &&
         x->type == GGML_TYPE_F32 && x->ne[0] == R && x->nb[0] == sizeof(float) && x->ne[2] == 1 && x->ne[3] == 1 && T <= 8 &&
         cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32 && cur->nb[0] == sizeof(float) && msg->nb[0] == sizeof(float) &&

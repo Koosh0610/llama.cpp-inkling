@@ -316,6 +316,11 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
 
     quantize &= params->quantize_output_tensor || name != "output.weight";
 
+    // only explicitly matched tensors change in this mode, so the exclusion list below does not apply
+    if (getenv("LLAMA_QUANT_ONLY_MATCHED")) {
+        return quantize;
+    }
+
     // do not quantize expert gating tensors
     // NOTE: can't use LLM_TN here because the layer number is not known
     quantize &= name.find("ffn_gate_inp.weight") == std::string::npos;

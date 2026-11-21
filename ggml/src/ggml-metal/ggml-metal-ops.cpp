@@ -5426,7 +5426,7 @@ int ggml_metal_op_loop_ctrl_fused(ggml_metal_op_t ctx, int idx) {
         /*.nbm1 =*/ msg->nb[1],
     };
 
-    auto pipeline = ggml_metal_library_get_pipeline_loop_ctrl(lib);
+    auto pipeline = ggml_metal_library_get_pipeline_loop_ctrl(lib, mf->src[0]->type);
 
     ggml_metal_encoder_set_pipeline(enc, pipeline);
     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
