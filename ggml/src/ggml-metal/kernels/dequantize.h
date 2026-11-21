@@ -363,21 +363,25 @@ void dequantize_mxfp4(device const block_mxfp4 * xb, short il, thread type4x4 & 
     reg = (type4x4) reg_f;
 }
 
+// e2m1 nibbles placed at fp16 bit 9 (magnitude) and bit 15 (sign) are the fp4 values times 2^-14, exactly
+static inline float4 e2m1x4_to_f32(uint w, float d) {
+    const ushort4 n = ushort4(as_type<uchar4>(w));
+    return float4(as_type<half4>(ushort4(((n & 7) << 9) | ((n & 8) << 12))))*d;
+}
+
 // il selects one of the 4 sub-blocks of 16: low nibbles are elements 0..7, high nibbles 8..15
 template <typename type4x4>
 void dequantize_nvfp4(device const block_nvfp4 * xb, short il, thread type4x4 & reg) {
-    device const uint8_t * q = xb->qs + 8*il;
+    device const uint * q = (device const uint *) (xb->qs + 8*il);
 
-    const float d = nvfp4_scale(xb->d[il]);
+    const float d = nvfp4_scale(xb->d[il])*16384.0f;
 
     float4x4 reg_f;
 
     for (int i = 0; i < 2; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            const uint8_t b = q[4*i + j];
-            reg_f[i    ][j] = d * kvalues_mxfp4_f[b & 0x0F];
-            reg_f[i + 2][j] = d * kvalues_mxfp4_f[b >> 4];
-        }
+        const uint w = q[i];
+        reg_f[i    ] = e2m1x4_to_f32( w       & 0x0F0F0F0F, d);
+        reg_f[i + 2] = e2m1x4_to_f32((w >> 4) & 0x0F0F0F0F, d);
     }
 
     reg = (type4x4) reg_f;
