@@ -731,6 +731,18 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
 
         dispatch_apply(n_cb, ctx->d_queue, ctx->encode_async);
 
+        if (getenv("GGML_METAL_GRAPH_DUMP") && gf->n_nodes > 5000) {
+            static int dumped = 0;
+            if (++dumped == atoi(getenv("GGML_METAL_GRAPH_DUMP"))) {
+                for (int i = 0; i < gf->n_nodes; ++i) {
+                    const struct ggml_tensor * t = gf->nodes[i];
+                    fprintf(stderr, "GOP %5d %-12s %-34s [%lld,%lld,%lld] <- %s%s%s\n", i, ggml_op_desc(t), t->name,
+                            (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2],
+                            t->src[0] ? t->src[0]->name : "-", t->src[1] ? " , " : "", t->src[1] ? t->src[1]->name : "");
+                }
+            }
+        }
+
         // for debugging: block until graph is computed
         //[ctx->cmd_buf_last waitUntilCompleted];
 
