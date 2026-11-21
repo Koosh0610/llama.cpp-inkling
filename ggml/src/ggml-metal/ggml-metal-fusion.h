@@ -46,6 +46,7 @@ typedef enum ggml_metal_fusion_id {
     GGML_METAL_FUSION_L2_CLIP,      // [MUL] + SQR + SUM_ROWS + SQRT + SCALE + FILL + DIV + CLAMP + MUL (row L2 norm clip)
     GGML_METAL_FUSION_SITU,         // softcapped gate: b*tanh(g/b)*sigmoid(g) * lb*tanh(u/lb), 9 ops
     GGML_METAL_FUSION_LOOP_CTRL,    // cur - tanh(Wf x)*cur + tanh(Wg x)*msg, two small F32 matvecs + 6 elementwise ops
+    GGML_METAL_FUSION_CONV_RES,     // CPY (conv state store) + SSM_CONV + ADD (residual) + SCALE
 } ggml_metal_fusion_id;
 
 struct ggml_metal_fusion; // defined in ggml-metal-fusion.cpp

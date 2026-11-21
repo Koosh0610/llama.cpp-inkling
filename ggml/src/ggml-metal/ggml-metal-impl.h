@@ -746,6 +746,18 @@ typedef struct {
 } ggml_metal_kargs_loop_ctrl;
 
 typedef struct {
+    int32_t  C;       // channels
+    int32_t  T;       // tokens
+    int32_t  K;       // conv taps
+    int32_t  Ks;      // state columns copied per channel
+    uint64_t nbx1;    // x channel stride
+    uint64_t nbs0;    // state source view strides (within x)
+    uint64_t nbs1;
+    uint64_t nbc1;    // residual token stride
+    float    scale;
+} ggml_metal_kargs_conv_res;
+
+typedef struct {
     int32_t  IC;
     int32_t  IH;
     int32_t  IW;

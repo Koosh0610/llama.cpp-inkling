@@ -869,6 +869,80 @@ static const std::vector<ggml_op> ops_l2_clip = {
     GGML_OP_SQR, GGML_OP_SUM_ROWS, GGML_OP_SQRT, GGML_OP_SCALE, GGML_OP_FILL, GGML_OP_DIV, GGML_OP_CLAMP, GGML_OP_MUL
 };
 
+// structural subgraph check over the raw node span of a match, view nodes included, so a pattern whose intermediate
+// result reaches the next op through a reshape/view still counts as fully contained
+static bool ggml_metal_fusion_raw_span_ok(const ggml_cgraph * gf, const int * node_idxs, int idx, int n_ops, int n_extra_outs, const int * extra_outs) {
+    const int i0 = node_idxs[idx];
+    const int i1 = node_idxs[idx + n_ops - 1];
+    if (i1 - i0 + 1 > 64) {
+        return false;
+    }
+    int     raw[64];
+    ggml_op ops[64];
+    int n = 0;
+    for (int i = i0; i <= i1; ++i) {
+        raw[n] = i;
+        ops[n] = gf->nodes[i]->op;
+        n++;
+    }
+    int outs[8];
+    outs[0] = i1;
+    for (int k = 0; k < n_extra_outs && k < 7; ++k) {
+        outs[k + 1] = extra_outs[k];
+    }
+    return ggml_can_fuse_subgraph_ext(gf, raw, n, ops, outs, 1 + n_extra_outs);
+}
+
+static const std::vector<ggml_op> ops_conv_res = { GGML_OP_SSM_CONV, GGML_OP_ADD, GGML_OP_SCALE };
+
+// ssm_conv(x, w) | add(cur, conv) | scale, one sequence, contiguous x and w (the conv state store is emitted earlier)
+static bool ggml_metal_fusion_check_conv_res(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * n,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(mode);
+
+    if (getenv("GGML_METAL_NO_CONV_RES")) {
+        return false;
+    }
+
+    {
+        GGML_UNUSED(fusion);
+        if (!ggml_metal_fusion_raw_span_ok(gf, node_idxs, idx, 3, 0, nullptr)) {
+            if (getenv("CONV_TRACE")) fprintf(stderr, "CONV_TRACE subgraph check failed\n");
+            return false;
+        }
+    }
+
+    const ggml_tensor * conv = n[0];
+    const ggml_tensor * add  = n[1];
+    const ggml_tensor * sc   = n[2];
+
+    const ggml_tensor * x = conv->src[0];
+    const ggml_tensor * w = conv->src[1];
+
+    const auto is_conv = [&](const ggml_tensor * t) { return t == conv || (t && t->view_src == conv && ggml_is_contiguous(t)); };
+    const ggml_tensor * cur = is_conv(add->src[0]) ? add->src[1] : (is_conv(add->src[1]) ? add->src[0] : nullptr);
+    if (!cur || sc->src[0] != add || ((const float *) sc->op_params)[1] != 0.0f) {
+        if (getenv("CONV_TRACE")) fprintf(stderr, "CONV_TRACE add/scale check failed cur=%p add0=%s add1=%s\n", (void *) cur, add->src[0]->name, add->src[1]->name);
+        return false;
+    }
+    if (getenv("CONV_TRACE")) fprintf(stderr, "CONV_TRACE shapes x=[%lld,%lld,%lld] contig=%d w=[%lld,%lld] contig=%d conv=[%lld,%lld,%lld] cur=[%lld,%lld] nb0=%zu sc_contig=%d\n",
+        (long long) x->ne[0], (long long) x->ne[1], (long long) x->ne[2], ggml_is_contiguous(x), (long long) w->ne[0], (long long) w->ne[1], ggml_is_contiguous(w),
+        (long long) conv->ne[0], (long long) conv->ne[1], (long long) conv->ne[2], (long long) cur->ne[0], (long long) cur->ne[1], cur->nb[0], ggml_is_contiguous(sc));
+
+    const int64_t C = conv->ne[0];
+    const int64_t T = conv->ne[1];
+
+    return x->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32 && ggml_is_contiguous(x) && ggml_is_contiguous(w) &&
+        conv->ne[2] == 1 && x->ne[2] == 1 && x->ne[1] == C && w->ne[1] == C && x->ne[0] == w->ne[0] - 1 + T &&
+        cur->type == GGML_TYPE_F32 && cur->nb[0] == sizeof(float) && ggml_nelements(cur) == C*T && cur->ne[0] == C &&
+        ggml_is_contiguous(sc) && ggml_nelements(sc) == C*T;
+}
+
 static const std::vector<ggml_op> ops_loop_ctrl = {
     GGML_OP_MUL_MAT, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_SUB, GGML_OP_MUL_MAT, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_ADD
 };
@@ -1099,6 +1173,8 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
     { GGML_METAL_FUSION_SITU, ops_situ, {}, true, ggml_metal_fusion_check_situ },
 
     { GGML_METAL_FUSION_LOOP_CTRL, ops_loop_ctrl, {}, true, ggml_metal_fusion_check_loop_ctrl },
+
+    { GGML_METAL_FUSION_CONV_RES, ops_conv_res, {}, true, ggml_metal_fusion_check_conv_res },
 };
 
 // ---- alloc deps -----------------------------------------------------------

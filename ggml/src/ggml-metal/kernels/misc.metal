@@ -560,6 +560,42 @@ typedef decltype(kernel_loop_ctrl<half>)  kernel_loop_ctrl_f16_t;
 template [[host_name("kernel_loop_ctrl_f32")]] kernel kernel_loop_ctrl_f32_t kernel_loop_ctrl<float>;
 template [[host_name("kernel_loop_ctrl_f16")]] kernel kernel_loop_ctrl_f16_t kernel_loop_ctrl<half>;
 
+// y[c, t] = (cur[c, t] + sum_k w[c, k]*x[c, t + k])*scale; thread (c, 0) also stores channel c of the conv state
+kernel void kernel_conv_res_f32(
+        constant ggml_metal_kargs_conv_res & args,
+        device const char  * x,
+        device const float * w,
+        device const char  * cur,
+        device const char  * ssrc,
+        device       float * sdst,
+        device       float * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort3 tpitg [[thread_position_in_threadgroup]],
+        ushort3 ntg   [[threads_per_threadgroup]]) {
+    const int c = tgpig.x*ntg.x + tpitg.x;
+    const int t = tgpig.y;
+    if (c >= args.C) {
+        return;
+    }
+
+    device const float * xc = (device const float *) (x + c*args.nbx1);
+    device const float * wc = w + c*args.K;
+
+    float acc = 0.0f;
+    for (int k = 0; k < args.K; ++k) {
+        acc += wc[k]*xc[t + k];
+    }
+
+    const float cv = ((device const float *) (cur + t*args.nbc1))[c];
+    dst[(int64_t) t*args.C + c] = (cv + acc)*args.scale;
+
+    if (t == 0) {
+        for (int k = 0; k < args.Ks; ++k) {
+            sdst[(int64_t) c*args.Ks + k] = *((device const float *) (ssrc + k*args.nbs0 + c*args.nbs1));
+        }
+    }
+}
+
 // y = b*tanh(g/b)*sigmoid(g) * lb*tanh(u/lb); g, u strided views with contiguous rows, y contiguous
 kernel void kernel_situ_f32(
         constant ggml_metal_kargs_situ & args,
