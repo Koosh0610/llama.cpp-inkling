@@ -844,6 +844,10 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, const llama_mod
             }
         }
 
+        if (!manual && getenv("LLAMA_QUANT_ONLY_MATCHED")) {
+            return tensor->type;
+        }
+
         // if not manual - use the standard logic for choosing the quantization type based on the selected mixture
         if (!manual && !params->pure) {
             new_type = llama_tensor_get_type_impl(qs, new_type, tensor, params->ftype, tm.category);
