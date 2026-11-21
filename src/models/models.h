@@ -2538,6 +2538,14 @@ struct llama_model_inkling2 : public llama_model_base {
         ggml_tensor * inp_out_ids = nullptr;
         ggml_tensor * tau         = nullptr; // log-scaled positions
         ggml_tensor * zero_sinks  = nullptr; // shared by every attention layer of the graph
+
+        // single token: normalized block stack and its transpose per distinct block list, reused by every mix of it
+        struct mix_prefix {
+            std::vector<ggml_tensor *> blocks;
+            ggml_tensor * norm   = nullptr; // [n_embd, n_blocks]
+            ggml_tensor * norm_t = nullptr; // [n_blocks, n_embd]
+        };
+        std::vector<mix_prefix> mix_cache;
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;

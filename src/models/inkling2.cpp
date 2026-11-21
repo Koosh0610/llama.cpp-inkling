@@ -180,6 +180,35 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *> 
         ggml_tensor * c3 = ggml_reshape_3d(ctx0, ggml_cont(ctx0, cur), n_embd, 1, n_tokens);
         return query->ne[1] == 1 ? c3 : ggml_repeat(ctx0, c3, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd, query->ne[1], n_tokens));
     }
+    if (n_tokens == 1 && !blocks.empty() && !getenv("INK_NO_MIX_CACHE")) {
+        mix_prefix * pre = nullptr;
+        for (auto & p : mix_cache) {
+            if (p.blocks == blocks) {
+                pre = &p;
+                break;
+            }
+        }
+        if (!pre) {
+            ggml_tensor * stack = ggml_reshape_2d(ctx0, blocks[0], n_embd, 1);
+            for (size_t i = 1; i < blocks.size(); ++i) {
+                stack = ggml_concat(ctx0, stack, ggml_reshape_2d(ctx0, blocks[i], n_embd, 1), 1);
+            }
+            stack = ggml_rms_norm(ctx0, stack, 1e-6f);
+            mix_cache.push_back({ blocks, stack, ggml_cont(ctx0, ggml_transpose(ctx0, stack)) });
+            pre = &mix_cache.back();
+        }
+
+        // the softmax-weighted sum does not depend on the order of the states
+        ggml_tensor * nc       = ggml_rms_norm(ctx0, ggml_reshape_2d(ctx0, cur, n_embd, 1), 1e-6f);
+        ggml_tensor * states   = ggml_concat(ctx0, pre->norm, nc, 1);
+        ggml_tensor * states_t = ggml_concat(ctx0, pre->norm_t, ggml_reshape_2d(ctx0, nc, 1, n_embd), 0);
+
+        ggml_tensor * scores = ggml_mul_mat(ctx0, states, query);
+        scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f/sqrtf(n_embd), 0.0f);
+
+        return ggml_reshape_3d(ctx0, ggml_mul_mat(ctx0, states_t, scores), n_embd, query->ne[1], 1);
+    }
+
     ggml_tensor * states = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
     for (ggml_tensor * block : blocks) {
         states = ggml_concat(ctx0, ggml_reshape_3d(ctx0, block, n_embd, 1, n_tokens), states, 1);
