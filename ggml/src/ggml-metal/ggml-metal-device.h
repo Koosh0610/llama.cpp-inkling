@@ -73,6 +73,9 @@ typedef void * ggml_metal_cmd_buf_t;
 typedef struct ggml_metal_encoder * ggml_metal_encoder_t;
 
 ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent);
+
+void ggml_metal_prof_set(void ** sample_buffers, int n, int per);
+int  ggml_metal_prof_count(void);
 void ggml_metal_encoder_free(ggml_metal_encoder_t encoder);
 
 void ggml_metal_encoder_debug_group_push(ggml_metal_encoder_t encoder, const char * name);

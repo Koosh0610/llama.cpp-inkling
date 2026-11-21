@@ -833,12 +833,38 @@ struct ggml_metal_encoder {
     id<MTLComputeCommandEncoder> obj;
 };
 
+// profiling: when set, each new encoder samples GPU timestamps at its start and end
+static void ** g_prof_sb = NULL;
+static int g_prof_idx = 0;
+static int g_prof_cap = 0;
+static int g_prof_per = 0;
+
+// sample_buffers: n buffers of `per` samples each (per must be even)
+void ggml_metal_prof_set(void ** sample_buffers, int n, int per) {
+    g_prof_sb  = sample_buffers;
+    g_prof_idx = 0;
+    g_prof_cap = n*per;
+    g_prof_per = per;
+}
+
+int ggml_metal_prof_count(void) {
+    return g_prof_idx;
+}
+
 ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent) {
     ggml_metal_encoder_t res = calloc(1, sizeof(struct ggml_metal_encoder));
 
     id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
 
-    if (concurrent) {
+    if (g_prof_sb && g_prof_idx + 2 <= g_prof_cap) {
+        MTLComputePassDescriptor * desc = [MTLComputePassDescriptor computePassDescriptor];
+        desc.dispatchType = MTLDispatchTypeSerial;
+        desc.sampleBufferAttachments[0].sampleBuffer = (id<MTLCounterSampleBuffer>) g_prof_sb[g_prof_idx / g_prof_per];
+        desc.sampleBufferAttachments[0].startOfEncoderSampleIndex = g_prof_idx % g_prof_per;
+        desc.sampleBufferAttachments[0].endOfEncoderSampleIndex   = g_prof_idx % g_prof_per + 1;
+        g_prof_idx += 2;
+        res->obj = [cmd_buf computeCommandEncoderWithDescriptor:desc];
+    } else if (concurrent) {
         res->obj = [cmd_buf computeCommandEncoderWithDispatchType: MTLDispatchTypeConcurrent];
     } else {
         res->obj = [cmd_buf computeCommandEncoder];

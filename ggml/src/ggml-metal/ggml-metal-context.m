@@ -471,6 +471,127 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
     }
 }
 
+// one command buffer for the whole graph, one encoder per fusion group with GPU timestamps at its start and end.
+// the GPU stays busy so clocks do not drop; encoder switches add a small fixed cost per group.
+// aggregated by "op | name" and dumped to stderr for graphs with more than 1000 nodes
+static enum ggml_status ggml_metal_graph_compute_profile(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+    static NSMutableDictionary<NSString *, NSMutableArray *> * stats = nil;
+    enum { NSB = 16, PER = 4096 };
+    static void * sb[NSB] = { 0 };
+    static int n_graphs = 0;
+    if (!stats) {
+        stats = [NSMutableDictionary new];
+    }
+    id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
+    if (!sb[0]) {
+        if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+            GGML_LOG_ERROR("%s: device does not support stage boundary counter sampling\n", __func__);
+            return GGML_STATUS_FAILED;
+        }
+        id<MTLCounterSet> ts = nil;
+        for (id<MTLCounterSet> cs in device.counterSets) {
+            if ([cs.name isEqualToString:MTLCommonCounterSetTimestamp]) ts = cs;
+        }
+        MTLCounterSampleBufferDescriptor * d = [MTLCounterSampleBufferDescriptor new];
+        d.counterSet = ts;
+        d.storageMode = MTLStorageModeShared;
+        d.sampleCount = PER;
+        for (int k = 0; k < NSB; k++) {
+            NSError * err = nil;
+            id<MTLCounterSampleBuffer> b = [device newCounterSampleBufferWithDescriptor:d error:&err];
+            if (!b) {
+                GGML_LOG_ERROR("%s: %s\n", __func__, [[err localizedDescription] UTF8String]);
+                return GGML_STATUS_FAILED;
+            }
+            [b retain];
+            sb[k] = (void *) b;
+        }
+    }
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
+    if (ctx->cmd_buf_last) {
+        [ctx->cmd_buf_last waitUntilCompleted];
+        ctx->cmd_buf_last = nil;
+    }
+    ctx->gf = gf;
+    int * first = malloc(sizeof(int)*gf->n_nodes);
+    int * len   = malloc(sizeof(int)*gf->n_nodes);
+    int n_first = 0;
+    double total_ms = 0;
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+        ggml_metal_prof_set(sb, NSB, PER);
+        for (int i = 0; i < gf->n_nodes; ) {
+            ggml_metal_op_t ctx_op = ggml_metal_op_init(ctx->dev, cmd_buf, gf, ctx->finfo, i, gf->n_nodes, false, false, 0);
+            int res = ggml_metal_op_encode(ctx_op, 0);
+            ggml_metal_op_free(ctx_op);
+            if (res <= 0) {
+                res = 1;
+            }
+            first[n_first] = i;
+            len[n_first] = res;
+            n_first++;
+            i += res;
+        }
+        const int n_samples = ggml_metal_prof_count();
+        ggml_metal_prof_set(NULL, 0, 0);
+        [cmd_buf commit];
+        [cmd_buf waitUntilCompleted];
+        total_ms = ([cmd_buf GPUEndTime] - [cmd_buf GPUStartTime])*1e3;
+        MTLCounterResultTimestamp * t = malloc(sizeof(MTLCounterResultTimestamp)*(n_samples + 2));
+        for (int k = 0; k*PER < n_samples; k++) {
+            const int n_k = MIN(PER, n_samples - k*PER);
+            NSData * data = [(__bridge id<MTLCounterSampleBuffer>) sb[k] resolveCounterRange:NSMakeRange(0, n_k)];
+            memcpy(t + k*PER, data.bytes, sizeof(MTLCounterResultTimestamp)*n_k);
+        }
+        const int n_groups = MIN(n_first, n_samples/2);
+        const double span = (double) (t[2*n_groups - 1].timestamp - t[0].timestamp);
+        const double us_per_tick = span > 0 ? total_ms*1e3/span : 0;
+        NSRegularExpression * re = [NSRegularExpression regularExpressionWithPattern:@"-\\d+" options:0 error:nil];
+        for (int g = 0; g < n_groups; g++) {
+            const double us = (double) (t[2*g + 1].timestamp - t[2*g].timestamp)*us_per_tick;
+            const struct ggml_tensor * node = gf->nodes[first[g]];
+            const bool is_mm = (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) && node->src[0];
+            NSString * name = [NSString stringWithUTF8String:is_mm ? node->src[0]->name : node->name];
+            name = [re stringByReplacingMatchesInString:name options:0 range:NSMakeRange(0, name.length) withTemplate:@"-N"];
+            if (is_mm) {
+                NSRegularExpression * rb = [NSRegularExpression regularExpressionWithPattern:@"blk\\.\\d+\\." options:0 error:nil];
+                name = [rb stringByReplacingMatchesInString:name options:0 range:NSMakeRange(0, name.length) withTemplate:@"blk.N."];
+                name = [name stringByAppendingFormat:@" [%s]", ggml_type_name(node->src[0]->type)];
+            }
+            NSString * key = [NSString stringWithFormat:@"%s%s | %@", ggml_op_desc(node), len[g] > 1 ? [[NSString stringWithFormat:@"+%d", len[g] - 1] UTF8String] : "", name];
+            NSMutableArray * e = stats[key];
+            if (!e) {
+                e = [NSMutableArray arrayWithObjects:@0.0, @0, nil];
+                stats[key] = e;
+            }
+            e[0] = @([e[0] doubleValue] + us);
+            e[1] = @([e[1] intValue] + 1);
+        }
+        free(t);
+    }
+    free(first);
+    free(len);
+    n_graphs++;
+    if (gf->n_nodes > 1000) {
+        NSArray * keys = [stats keysSortedByValueUsingComparator:^NSComparisonResult(NSArray * a, NSArray * b) {
+            return [b[0] compare:a[0]];
+        }];
+        double all = 0;
+        int groups = 0;
+        for (NSString * k in keys) { all += [stats[k][0] doubleValue]; groups += [stats[k][1] intValue]; }
+        fprintf(stderr, "PROFILE graph %d: nodes %d groups %d, gpu wall %.2f ms, sum of encoder times %.2f ms\n", n_graphs, gf->n_nodes, groups, total_ms, all/1e3);
+        int shown = 0;
+        for (NSString * k in keys) {
+            if (shown++ >= 45) break;
+            const double us = [stats[k][0] doubleValue];
+            const int c = [stats[k][1] intValue];
+            fprintf(stderr, "PROFILE %9.3f ms %5.1f%% x%-5d %8.2f us  %s\n", us/1000, 100*us/all, c, us/c, [k UTF8String]);
+        }
+        [stats removeAllObjects];
+    }
+    return GGML_STATUS_SUCCESS;
+}
+
 enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
     if (ctx->has_error) {
         GGML_LOG_ERROR("%s: backend is in error state from a previous command buffer failure - recreate the backend to recover\n", __func__);
@@ -479,6 +600,10 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
 
     if (gf->n_nodes == 0) {
         return GGML_STATUS_SUCCESS;
+    }
+
+    if (getenv("GGML_METAL_PROFILE")) {
+        return ggml_metal_graph_compute_profile(ctx, gf);
     }
 
     // number of nodes encoded by the main thread (empirically determined)
