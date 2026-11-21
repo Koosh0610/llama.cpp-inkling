@@ -13768,6 +13768,33 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
 
+    if (getenv("INKLING_PERF")) {
+        for (ggml_type t : {GGML_TYPE_Q4_K, GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S, GGML_TYPE_Q3_K, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ4_XS, GGML_TYPE_Q4_0, GGML_TYPE_MXFP4, GGML_TYPE_NVFP4}) {
+            for (int n : {1, 4, 8}) {
+                test_cases.emplace_back(new test_mul_mat_id(t, GGML_TYPE_F32, 128, 8, false, 2304, n, 2304));
+                if (1152 % ggml_blck_size(t) == 0) {
+                    test_cases.emplace_back(new test_mul_mat_id(t, GGML_TYPE_F32, 128, 8, false, 2304, n, 1152));
+                }
+            }
+        }
+        for (ggml_type t : {GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, 3072, 1, 2304, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, 1024, 1, 2304, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, 2304, 1, 3072, {1, 1}, {1, 1}));
+        }
+        for (ggml_type t : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_NVFP4}) {
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, 18432, 1, 2304, {1, 1}, {1, 1}));
+        }
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_K, GGML_TYPE_F32, 201024, 1, 2304, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 64, 1, 4608, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 2304, 1, 64, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F32, {4096, 16384, 1, 1}));
+        test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32, {4096, 16384, 1, 1}));
+        test_cases.emplace_back(new test_unary(GGML_UNARY_OP_TANH, GGML_TYPE_F32, {2304, 1, 1, 1}));
+        test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {2304, 1, 1, 1}));
+        return test_cases;
+    }
+
     test_cases.emplace_back(new test_timestep_embedding());
     test_cases.emplace_back(new test_timestep_embedding(GGML_TYPE_F32, {32769, 1, 1, 1}, 4096, 10000));
     test_cases.emplace_back(new test_timestep_embedding(GGML_TYPE_F32, {65, 1, 1, 1}, 1, 10000));
