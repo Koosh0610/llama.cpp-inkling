@@ -471,6 +471,14 @@ static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node
             case GGML_OP_CPY:
             case GGML_OP_CONT:
             case GGML_OP_REPEAT:
+            case GGML_OP_CONCAT:
+            case GGML_OP_SOFT_MAX:
+            case GGML_OP_FILL:
+            case GGML_OP_PAD:
+            case GGML_OP_SQR:
+            case GGML_OP_SQRT:
+            case GGML_OP_LOG:
+            case GGML_OP_FLASH_ATTN_EXT:
                 return true;
             default:
                 return ggml_op_is_empty(op);
