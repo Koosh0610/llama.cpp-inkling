@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inkling Side by Side</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6862; --line: #e3e0da;
+  --user: #ece9e3; --accent-a: #8a6d3b; --accent-b: #2f6f5e; --good: #2f7d4f; --code: #f1efea;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161514; --panel: #1f1e1c; --ink: #ecebe7; --muted: #9a968e; --line: #34322e;
+    --user: #2b2926; --accent-a: #d0a868; --accent-b: #6cc3a8; --good: #74c79a; --code: #2a2825;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161514; --panel: #1f1e1c; --ink: #ecebe7; --muted: #9a968e; --line: #34322e;
+  --user: #2b2926; --accent-a: #d0a868; --accent-b: #6cc3a8; --good: #74c79a; --code: #2a2825;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  display: flex; flex-direction: column;
+}
+header {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+header .spacer { flex: 1; }
+header label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+header input[type=number] { width: 72px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 4px; }
+.dot.ready { background: var(--good); }
+.status { font-size: 13px; color: var(--muted); }
+main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); min-height: 0; }
+.col { background: var(--bg); display: flex; flex-direction: column; min-height: 0; }
+.col h2 {
+  margin: 0; padding: 10px 16px; font-size: 14px; font-weight: 600;
+  border-bottom: 1px solid var(--line); background: var(--panel); display: flex; align-items: center; gap: 8px;
+}
+.col h2 .tag { width: 10px; height: 10px; border-radius: 2px; }
+.col.a h2 .tag { background: var(--accent-a); }
+.col.b h2 .tag { background: var(--accent-b); }
+.col h2 .state { margin-left: auto; font-weight: 400; color: var(--muted); font-size: 12px; }
+.log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.msg { padding: 10px 12px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
+.msg.user { background: var(--user); align-self: flex-end; max-width: 90%; }
+.msg.assistant { background: var(--panel); border: 1px solid var(--line); }
+.msg details { margin-bottom: 6px; }
+.msg summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.msg .think { color: var(--muted); font-size: 13px; white-space: pre-wrap; margin-top: 6px; }
+.msg .answer:empty::before { content: "…"; color: var(--muted); }
+.stats {
+  border-top: 1px solid var(--line); background: var(--panel); padding: 10px 16px;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; font-size: 13px;
+}
+.stat .k { color: var(--muted); font-size: 12px; }
+.stat .v { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 15px; }
+.stat .s { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.compare {
+  background: var(--panel); border-top: 1px solid var(--line); padding: 8px 16px; font-size: 13px;
+  color: var(--muted); display: flex; gap: 24px; flex-wrap: wrap;
+}
+.compare b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.compare b.win { color: var(--good); }
+form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+textarea {
+  flex: 1; resize: none; height: 56px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit;
+}
+button {
+  padding: 0 18px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--ink); color: var(--bg); font: inherit; font-weight: 600; cursor: pointer;
+}
+button.secondary { background: transparent; color: var(--ink); }
+button:disabled { opacity: .5; cursor: default; }
+input[type=number] { background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; font: inherit; }
+.note { font-size: 12px; color: var(--muted); padding: 0 16px 10px; background: var(--panel); }
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Inkling 2 Mini · side by side</h1>
+  <span class="status" id="health">checking engines…</span>
+  <span class="spacer"></span>
+  <label>max tokens <input type="number" id="maxTokens" value="512" min="16" max="4096" step="16"></label>
+  <label><input type="checkbox" id="showThink"> reasoning</label>
+  <button class="secondary" id="clear" type="button">New chat</button>
+</header>
+
+<main>
+  <section class="col a" id="col-stock">
+    <h2><span class="tag"></span><span class="name">llama.cpp (upstream)</span><span class="state">idle</span></h2>
+    <div class="log"></div>
+    <div class="stats"></div>
+  </section>
+  <section class="col b" id="col-ours">
+    <h2><span class="tag"></span><span class="name">ours (M5 kernels)</span><span class="state">idle</span></h2>
+    <div class="log"></div>
+    <div class="stats"></div>
+  </section>
+</main>
+
+<div class="compare" id="compare">Send a prompt: upstream runs first, then ours, each streaming live.</div>
+<form id="form">
+  <textarea id="prompt" placeholder="Ask something… (Enter to send, Shift+Enter for newline)"></textarea>
+  <button id="send" type="submit">Send</button>
+  <button id="stop" type="button" class="secondary" disabled>Stop</button>
+</form>
+<div class="note">Same GGUF, temperature 0, prompt cache off. Only one engine fits in the GPU working set at a time, so each run starts its engine first; load time is shown but excluded from the stats.</div>
+
+<script>
+const ENGINES = ["stock", "ours"];
+const state = {
+  stock: { history: [], last: null },
+  ours:  { history: [], last: null },
+};
+let controller = null;
+
+const $ = (s, el = document) => el.querySelector(s);
+const col = (e) => $(`#col-${e}`);
+
+function fmt(n, d = 1) { return n == null || !isFinite(n) ? "–" : n.toFixed(d); }
+
+function renderStats(e, s) {
+  const el = $(".stats", col(e));
+  if (!s) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <div class="stat"><div class="k">Prefill</div><div class="v">${fmt(s.prefillTps)} tok/s</div>
+      <div class="s">${s.promptN ?? "–"} tok · ${fmt(s.promptMs, 0)} ms</div></div>
+    <div class="stat"><div class="k">Decode</div><div class="v">${fmt(s.decodeTps)} tok/s</div>
+      <div class="s">${s.decodeN ?? "–"} tok · ${fmt(s.decodeMs / 1000, 2)} s</div></div>
+    <div class="stat"><div class="k">Time to first token</div><div class="v">${fmt(s.ttftMs, 0)} ms</div>
+      <div class="s">wall, after engine load</div></div>
+    <div class="stat"><div class="k">Total</div><div class="v">${fmt(s.totalMs / 1000, 2)} s</div>
+      <div class="s">${s.live ? "streaming…" : (s.fromServer ? "server timings" : "client timings")}${s.loadS ? ` · engine load ${fmt(s.loadS, 1)} s (excluded)` : ""}</div></div>`;
+}
+
+function renderCompare() {
+  const a = state.stock.last, b = state.ours.last;
+  if (!a || !b || a.live || b.live) return;
+  const ratio = (x, y) => (x && y) ? y / x : null;
+  const dec = ratio(a.decodeTps, b.decodeTps), pre = ratio(a.prefillTps, b.prefillTps);
+  const tot = (a.totalMs && b.totalMs) ? a.totalMs / b.totalMs : null;
+  const cls = (r) => r && r > 1 ? "win" : "";
+  $("#compare").innerHTML = `
+    <span>Decode: <b class="${cls(dec)}">${fmt(dec, 2)}×</b> (${fmt(a.decodeTps)} → ${fmt(b.decodeTps)} tok/s)</span>
+    <span>Prefill: <b class="${cls(pre)}">${fmt(pre, 2)}×</b> (${fmt(a.prefillTps)} → ${fmt(b.prefillTps)} tok/s)</span>
+    <span>Total time: <b class="${cls(tot)}">${fmt(tot, 2)}×</b> faster</span>`;
+}
+
+function addMsg(e, role, text) {
+  const div = document.createElement("div");
+  div.className = `msg ${role}`;
+  if (role === "assistant") {
+    div.innerHTML = `<details ${$("#showThink").checked ? "open" : ""} hidden><summary>reasoning</summary><div class="think"></div></details><div class="answer"></div>`;
+  } else {
+    div.textContent = text;
+  }
+  const log = $(".log", col(e));
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+async function runEngine(e, prompt) {
+  const st = state[e];
+  const h2state = $(".state", col(e));
+  st.history.push({ role: "user", content: prompt });
+  addMsg(e, "user", prompt);
+  const box = addMsg(e, "assistant");
+  const think = $(".think", box), details = $("details", box), answer = $(".answer", box);
+  const log = $(".log", col(e));
+
+  let t0 = performance.now();
+  let tFirst = null, nTok = 0, content = "", reasoning = "", timings = null;
+  const s = { live: true };
+  st.last = s;
+  h2state.textContent = "loading engine…";
+  let started = false;
+
+  const tick = () => {
+    if (!started) return;
+    const now = performance.now();
+    s.ttftMs = tFirst ? tFirst - t0 : null;
+    s.decodeN = nTok;
+    s.decodeMs = tFirst ? now - tFirst : null;
+    s.decodeTps = tFirst && nTok > 1 ? (nTok - 1) / ((now - tFirst) / 1000) : null;
+    s.totalMs = now - t0;
+    renderStats(e, s);
+  };
+  const timer = setInterval(tick, 200);
+
+  try {
+    const res = await fetch(`/api/chat/${e}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: st.history, max_tokens: +$("#maxTokens").value || 512, temperature: 0, reasoning: $("#showThink").checked }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+    s.loadS = +res.headers.get("X-Engine-Load-Seconds") || 0;
+    t0 = performance.now();
+    started = true;
+    h2state.textContent = "prefilling…";
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        let j;
+        try { j = JSON.parse(data); } catch { continue; }
+        if (j.timings) timings = j.timings;
+        const d = j.choices && j.choices[0] && j.choices[0].delta;
+        if (!d) continue;
+        const piece = (d.reasoning_content || "") + (d.content || "");
+        if (!piece) continue;
+        if (!tFirst) { tFirst = performance.now(); h2state.textContent = "decoding…"; }
+        nTok++;
+        if (d.reasoning_content) {
+          reasoning += d.reasoning_content;
+          details.hidden = false;
+          think.textContent = reasoning;
+        }
+        if (d.content) {
+          content += d.content;
+          answer.textContent = content;
+        }
+        const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+        if (nearBottom) log.scrollTop = log.scrollHeight;
+      }
+    }
+    h2state.textContent = "done";
+  } catch (err) {
+    h2state.textContent = err.name === "AbortError" ? "stopped" : "error";
+    if (err.name !== "AbortError") answer.textContent = `[${err.message}]`;
+  } finally {
+    clearInterval(timer);
+    started = true;
+    tick();
+    s.live = false;
+    if (timings) {
+      s.fromServer = true;
+      s.promptN = timings.prompt_n;
+      s.promptMs = timings.prompt_ms;
+      s.prefillTps = timings.prompt_per_second;
+      s.decodeN = timings.predicted_n;
+      s.decodeMs = timings.predicted_ms;
+      s.decodeTps = timings.predicted_per_second;
+    }
+    renderStats(e, s);
+    st.history.push({ role: "assistant", content });
+    if (!details.hidden && !$("#showThink").checked) details.open = false;
+  }
+}
+
+async function send(prompt) {
+  controller = new AbortController();
+  $("#send").disabled = true; $("#stop").disabled = false;
+  $("#compare").textContent = "Running upstream llama.cpp…";
+  for (const e of ENGINES) state[e].last = null;
+  renderStats("stock", null); renderStats("ours", null);
+  $(".state", col("ours")).textContent = "waiting";
+  await runEngine("stock", prompt);
+  if (!controller.signal.aborted) {
+    $("#compare").textContent = "Running ours…";
+    await runEngine("ours", prompt);
+  }
+  renderCompare();
+  if (controller.signal.aborted) $("#compare").textContent = "Stopped.";
+  $("#send").disabled = false; $("#stop").disabled = true;
+}
+
+$("#form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const p = $("#prompt").value.trim();
+  if (!p || $("#send").disabled) return;
+  $("#prompt").value = "";
+  send(p);
+});
+$("#prompt").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("#form").requestSubmit(); }
+});
+$("#stop").addEventListener("click", () => controller && controller.abort());
+$("#clear").addEventListener("click", () => {
+  for (const e of ENGINES) {
+    state[e] = { history: [], last: null };
+    $(".log", col(e)).innerHTML = ""; renderStats(e, null); $(".state", col(e)).textContent = "idle";
+  }
+  $("#compare").textContent = "Send a prompt: upstream runs first, then ours, each streaming live.";
+});
+
+async function health() {
+  try {
+    const j = await (await fetch("/api/health")).json();
+    $("#health").innerHTML = Object.entries(j.engines).map(([k, v]) =>
+      `<span><span class="dot ${v.status === "ready" ? "ready" : ""}"></span>${v.label}: ${v.status}</span>`).join(" &nbsp; ");
+  } catch { $("#health").textContent = "UI server unreachable"; }
+}
+health(); setInterval(health, 5000);
+</script>
+</body>
+</html>
