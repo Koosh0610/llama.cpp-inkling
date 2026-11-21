@@ -3132,6 +3132,93 @@ void kernel_mul_mv_mxfp4_f32_impl(
     }
 }
 
+// each thread takes whole 32-weight halves of 64-weight blocks for NR0 rows at a time, so a row of K=2304
+// gives 72 work items per simdgroup and every row adds independent loads in flight
+template<int NR0, typename args_t>
+void kernel_mul_mv_nvfp4_f32_impl(
+        args_t args,
+        device const char * src0,
+        device const char * src1,
+        device       char * dst,
+        threadgroup  char * shmem,
+        uint3  tgpig,
+        ushort tiisg,
+        ushort sgitg) {
+    const short NSG = FC_mul_mv_nsg;
+
+    const int r0 = tgpig.x;
+    const int r1 = tgpig.y;
+    const int im = tgpig.z;
+
+    const int first_row = (r0 * NSG + sgitg) * NR0;
+
+    const uint i12 = im%FC_mul_mv_ne12;
+    const uint i13 = im/FC_mul_mv_ne12;
+
+    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
+    const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
+
+    device const block_nvfp4 * x = (device const block_nvfp4 *) (src0 + offset0);
+    device const float       * y = (device const float       *) (src1 + offset1);
+
+    const int nb   = args.ne00/QK_NVFP4;
+    const int ns01 = args.nb01/args.nb00;
+
+    float sumf[NR0] = {0.f};
+
+    for (int u = tiisg; u < 2*nb; u += 32) {
+        const int ib = u >> 1;
+        const int h  = u & 1;
+
+        device const float4 * y4 = (device const float4 *) (y + ib*QK_NVFP4 + h*32);
+
+        float4 yl[8];
+        FOR_UNROLL (short j = 0; j < 8; j++) {
+            yl[j] = y4[j];
+        }
+
+        FOR_UNROLL (short row = 0; row < NR0; row++) {
+            device const block_nvfp4 & xb = x[row*ns01 + ib];
+            device const uint32_t    * qw = (device const uint32_t *) (xb.qs + 16*h);
+
+            const uint32_t w0 = qw[0];
+            const uint32_t w1 = qw[1];
+            const uint32_t w2 = qw[2];
+            const uint32_t w3 = qw[3];
+
+            const float4 a = yl[0]*mxfp4_lo4(w0) + yl[1]*mxfp4_lo4(w1) + yl[2]*mxfp4_hi4(w0) + yl[3]*mxfp4_hi4(w1);
+            const float4 b = yl[4]*mxfp4_lo4(w2) + yl[5]*mxfp4_lo4(w3) + yl[6]*mxfp4_hi4(w2) + yl[7]*mxfp4_hi4(w3);
+
+            sumf[row] += nvfp4_scale_div256(xb.d[2*h    ]) * ((a[0] + a[1]) + (a[2] + a[3])) +
+                         nvfp4_scale_div256(xb.d[2*h + 1]) * ((b[0] + b[1]) + (b[2] + b[3]));
+        }
+    }
+
+    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
+
+    // 2^22 undoes the 2^-14 of the E2M1 decode and the /256 of the scale decode
+    for (int row = 0; row < NR0 && first_row + row < args.ne0; ++row) {
+        const float sum_all = simd_sum(sumf[row]);
+        if (tiisg == 0) {
+            dst_f32[first_row + row] = sum_all*4194304.0f;
+        }
+    }
+}
+
+[[host_name("kernel_mul_mv_nvfp4_f32")]]
+kernel void kernel_mul_mv_nvfp4_f32(
+        constant ggml_metal_kargs_mul_mv & args,
+        device const char * src0,
+        device const char * src1,
+        device       char * dst,
+        threadgroup  char * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiisg[[thread_index_in_simdgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+
+    kernel_mul_mv_nvfp4_f32_impl<N_R0_NVFP4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+}
+
 [[host_name("kernel_mul_mv_mxfp4_f32")]]
 kernel void kernel_mul_mv_mxfp4_f32(
         constant ggml_metal_kargs_mul_mv & args,
@@ -3412,6 +3499,7 @@ template [[host_name("kernel_mul_mv_id_q5_0_f32")]]    kernel kernel_mul_mv_id_t
 template [[host_name("kernel_mul_mv_id_q5_1_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q5_1, N_R0_Q5_1>>>;
 
 template [[host_name("kernel_mul_mv_id_mxfp4_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_mxfp4_f32_impl<N_R0_MXFP4>>>;
+template [[host_name("kernel_mul_mv_id_nvfp4_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_nvfp4_f32_impl<N_R0_NVFP4>>>;
 
 template [[host_name("kernel_mul_mv_id_q2_K_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q2_K_f32_impl   <N_R0_Q2_K>>>;
 template [[host_name("kernel_mul_mv_id_q3_K_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q3_K_f32_impl   <N_R0_Q3_K>>>;

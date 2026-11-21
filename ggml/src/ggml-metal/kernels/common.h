@@ -68,6 +68,17 @@ static inline float e8m0_to_fp32(uint8_t x) {
     return as_type<float>(bits);
 }
 
+// UE4M3 scale as a half bit pattern: equals the true scale / 256, exact for normal and subnormal codes.
+// 0x7F (NaN) decodes to 0 and the unused top bit is ignored, matching ggml_ue4m3_to_fp32.
+static inline float nvfp4_scale_div256(uint8_t x) {
+    x &= 0x7F;
+    return x == 0x7F ? 0.0f : (float) as_type<half>(ushort(ushort(x) << 7));
+}
+
+static inline float nvfp4_scale(uint8_t x) {
+    return nvfp4_scale_div256(x)*256.0f;
+}
+
 static inline float dot(float x, float y) {
     return x*y;
 }
