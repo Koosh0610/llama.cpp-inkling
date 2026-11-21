@@ -176,6 +176,10 @@ ggml_tensor * llama_model_inkling2::graph::clip(ggml_tensor * cur, ggml_tensor *
 
 // attention over the depth: mix the earlier block outputs and cur with learned queries
 ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query) {
+    if (getenv("INK_SKIP_MIX")) { // timing experiment only, output is wrong
+        ggml_tensor * c3 = ggml_reshape_3d(ctx0, ggml_cont(ctx0, cur), n_embd, 1, n_tokens);
+        return query->ne[1] == 1 ? c3 : ggml_repeat(ctx0, c3, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd, query->ne[1], n_tokens));
+    }
     ggml_tensor * states = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
     for (ggml_tensor * block : blocks) {
         states = ggml_concat(ctx0, ggml_reshape_3d(ctx0, block, n_embd, 1, n_tokens), states, 1);
@@ -202,6 +206,9 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
         ggml_tensor * history,
         llm_graph_input_rs * inp,
         int64_t offset) {
+    if (getenv("INK_SKIP_CONV")) { // timing experiment only, output is wrong
+        return cur;
+    }
     const int64_t n_conv       = hparams.n_shortconv_l_cache;
     const int64_t n_channels   = cur->ne[0];
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
