@@ -511,6 +511,48 @@ typedef decltype(kernel_count_equal<int32_t>) kernel_count_equal_t;
 
 template [[host_name("kernel_count_equal_i32")]] kernel kernel_count_equal_t kernel_count_equal<int32_t>;
 
+// y[c] = cur[c] - tanh(wf[c].x)*cur[c] + tanh(wg[c].x)*msg[c], one simdgroup per (channel, token): the lanes read
+// consecutive weights of the channel row
+kernel void kernel_loop_ctrl_f32(
+        constant ggml_metal_kargs_loop_ctrl & args,
+        device const float * wf,
+        device const float * wg,
+        device const char  * x,
+        device const char  * cur,
+        device const char  * msg,
+        device       float * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiisg [[thread_index_in_simdgroup]],
+        ushort  sgitg [[simdgroup_index_in_threadgroup]],
+        ushort3 ntg3  [[threads_per_threadgroup]]) {
+    const int c = tgpig.x*(ntg3.x/32) + sgitg;
+    const int t = tgpig.y;
+    if (c >= args.C) {
+        return;
+    }
+
+    device const float * xr = (device const float *) (x + t*args.nbx1);
+    device const float * fr = wf + (int64_t) c*args.R;
+    device const float * gr = wg + (int64_t) c*args.R;
+
+    float af = 0.0f;
+    float ag = 0.0f;
+    for (int i = tiisg; i < args.R; i += 32) {
+        const float xv = xr[i];
+        af += fr[i]*xv;
+        ag += gr[i]*xv;
+    }
+    const float f = simd_sum(af);
+    const float g = simd_sum(ag);
+
+    if (tiisg == 0) {
+        const float cv = ((device const float *) (cur + t*args.nbc1))[c];
+        const float mv = ((device const float *) (msg + t*args.nbm1))[c];
+
+        dst[(int64_t) t*args.C + c] = (cv - precise::tanh(f)*cv) + precise::tanh(g)*mv;
+    }
+}
+
 // y = b*tanh(g/b)*sigmoid(g) * lb*tanh(u/lb); g, u strided views with contiguous rows, y contiguous
 kernel void kernel_situ_f32(
         constant ggml_metal_kargs_situ & args,

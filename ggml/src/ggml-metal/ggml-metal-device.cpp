@@ -2514,6 +2514,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_snake(ggml_metal
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_loop_ctrl(ggml_metal_library_t lib) {
+    const char * name = "kernel_loop_ctrl_f32";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+    }
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_situ(ggml_metal_library_t lib) {
     const char * name = "kernel_situ_f32";
 

@@ -869,6 +869,64 @@ static const std::vector<ggml_op> ops_l2_clip = {
     GGML_OP_SQR, GGML_OP_SUM_ROWS, GGML_OP_SQRT, GGML_OP_SCALE, GGML_OP_FILL, GGML_OP_DIV, GGML_OP_CLAMP, GGML_OP_MUL
 };
 
+static const std::vector<ggml_op> ops_loop_ctrl = {
+    GGML_OP_MUL_MAT, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_SUB, GGML_OP_MUL_MAT, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_ADD
+};
+
+// mm_f(x) tanh | mul(., cur) | sub(cur, .) | mm_g(x) tanh | mul(., msg) | add. weights are F32 [R, C] with small R,
+// and only a few tokens, so one thread per output channel computes both dot products
+static bool ggml_metal_fusion_check_loop_ctrl(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * n,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(mode);
+
+    if (getenv("GGML_METAL_NO_LOOP_CTRL")) {
+        return false;
+    }
+
+    {
+        int out = node_idxs[idx + 7];
+        if (!ggml_can_fuse_subgraph_ext(gf, node_idxs + idx, 8, fusion->ops.data(), &out, 1)) {
+            return false;
+        }
+    }
+
+    const auto is_tanh = [](const ggml_tensor * t) {
+        return t->op == GGML_OP_UNARY && ggml_get_unary_op(t) == GGML_UNARY_OP_TANH;
+    };
+    const auto other = [](const ggml_tensor * t, const ggml_tensor * a) -> const ggml_tensor * {
+        return t->src[0] == a ? t->src[1] : (t->src[1] == a ? t->src[0] : nullptr);
+    };
+
+    const ggml_tensor * wf = n[0]->src[0];
+    const ggml_tensor * x  = n[0]->src[1];
+    const ggml_tensor * wg = n[4]->src[0];
+    if (n[4]->src[1] != x || !is_tanh(n[1]) || !is_tanh(n[5]) || n[1]->src[0] != n[0] || n[5]->src[0] != n[4]) {
+        return false;
+    }
+
+    const ggml_tensor * cur = other(n[2], n[1]);
+    const ggml_tensor * msg = other(n[6], n[5]);
+    if (!cur || !msg || n[3]->src[0] != cur || n[3]->src[1] != n[2] || !other(n[7], n[3]) || other(n[7], n[3]) != n[6]) {
+        return false;
+    }
+
+    const int64_t R = wf->ne[0];
+    const int64_t C = wf->ne[1];
+    const int64_t T = x->ne[1];
+
+    return wf->type == GGML_TYPE_F32 && wg->type == GGML_TYPE_F32 && ggml_are_same_shape(wf, wg) &&
+        ggml_is_contiguous(wf) && ggml_is_contiguous(wg) && R <= 256 && R % 4 == 0 &&
+        x->type == GGML_TYPE_F32 && x->ne[0] == R && x->nb[0] == sizeof(float) && x->ne[2] == 1 && x->ne[3] == 1 && T <= 8 &&
+        cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32 && cur->nb[0] == sizeof(float) && msg->nb[0] == sizeof(float) &&
+        cur->ne[0] == C && msg->ne[0] == C && cur->ne[1] == T && msg->ne[1] == T &&
+        n[7]->type == GGML_TYPE_F32 && ggml_is_contiguous(n[7]) && n[7]->ne[0] == C && n[7]->ne[1] == T;
+}
+
 static const std::vector<ggml_op> ops_situ = {
     GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE, GGML_OP_MUL
 };
@@ -1039,6 +1097,8 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
     { GGML_METAL_FUSION_L2_CLIP, ops_l2_clip,        {}, true, ggml_metal_fusion_check_l2_clip },
 
     { GGML_METAL_FUSION_SITU, ops_situ, {}, true, ggml_metal_fusion_check_situ },
+
+    { GGML_METAL_FUSION_LOOP_CTRL, ops_loop_ctrl, {}, true, ggml_metal_fusion_check_loop_ctrl },
 };
 
 // ---- alloc deps -----------------------------------------------------------

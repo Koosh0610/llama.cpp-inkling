@@ -738,6 +738,14 @@ typedef struct {
 } ggml_metal_kargs_situ;
 
 typedef struct {
+    int32_t  R;     // rank (x rows)
+    int32_t  C;     // channels
+    uint64_t nbx1;
+    uint64_t nbc1;
+    uint64_t nbm1;
+} ggml_metal_kargs_loop_ctrl;
+
+typedef struct {
     int32_t  IC;
     int32_t  IH;
     int32_t  IW;
