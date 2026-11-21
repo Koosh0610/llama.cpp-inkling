@@ -1544,6 +1544,11 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
         nsg = atoi(e);
     }
 
+    // a few tokens: read each distinct expert once (see kernel_mul_mv_id_nvfp4_grouped)
+    if (tsrc0 == GGML_TYPE_NVFP4 && op->src[2]->ne[1] >= 2 && op->src[2]->ne[1] <= 8 && op->src[2]->ne[0]*op->src[2]->ne[1] <= 64 && !getenv("GGML_METAL_NO_GROUPED")) {
+        suffix = "_grouped";
+    }
+
     snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), suffix);
     snprintf(name, 256, "%s_nsg=%d_split=%d", base, nsg, split);
 

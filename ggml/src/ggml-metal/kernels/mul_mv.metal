@@ -3501,6 +3501,129 @@ template [[host_name("kernel_mul_mv_id_q5_1_f32")]]    kernel kernel_mul_mv_id_t
 template [[host_name("kernel_mul_mv_id_mxfp4_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_mxfp4_f32_impl<N_R0_MXFP4>>>;
 template [[host_name("kernel_mul_mv_id_nvfp4_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_nvfp4_f32_impl<N_R0_NVFP4>>>;
 
+// small batches (2..MAXT tokens): the first (token, slot) pair that selects an expert reads and decodes its weights once
+// and computes every pair that uses that expert; later pairs with the same expert exit. same grid as kernel_mul_mv_id
+template<int NR0, int MAXT>
+kernel void kernel_mul_mv_id_nvfp4_grouped(
+        constant ggml_metal_kargs_mul_mv_id & args,
+        device const char * src0s,
+        device const char * src1,
+        device       char * dst,
+        device const char * ids,
+        threadgroup  char * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort tiisg[[thread_index_in_simdgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]],
+        ushort3 ntg [[threads_per_threadgroup]]) {
+    const int iid1 = tgpig.z/args.nei0;
+    const int idx  = tgpig.z%args.nei0;
+
+    const int32_t e = ((device const int32_t *) (ids + iid1*args.nbi1))[idx];
+
+    if (e == -1) {
+        device float * dst_f32 = (device float *) (dst + (idx*args.ne0 + iid1*args.ne1*args.ne0)*sizeof(float));
+        const ushort nth = ntg.x*ntg.y*ntg.z;
+        for (int i0 = tiitg; i0 < args.ne0; i0 += nth) {
+            dst_f32[i0] = 0.0f;
+        }
+        return;
+    }
+
+    // one id per lane (pairs p and p + 32, p = token*nei0 + slot, at most 64 pairs): a ballot gives the mask of pairs
+    // that select this expert, the lowest set bit is the owner
+    const int np = args.nei0*args.nei1;
+    const int p0 = tiisg;
+    const int p1 = tiisg + 32;
+    const int32_t id0 = p0 < np ? ((device const int32_t *) (ids + (p0/args.nei0)*args.nbi1))[p0%args.nei0] : -2;
+    const int32_t id1 = p1 < np ? ((device const int32_t *) (ids + (p1/args.nei0)*args.nbi1))[p1%args.nei0] : -2;
+    const ulong m0 = (ulong) (simd_vote::vote_t) simd_ballot(id0 == e);
+    const ulong m1 = (ulong) (simd_vote::vote_t) simd_ballot(id1 == e);
+    const ulong mask = (m0 & 0xFFFFFFFFul) | (m1 << 32);
+
+    const int me = iid1*args.nei0 + idx;
+    if (mask & ((1ul << me) - 1)) {
+        return;
+    }
+
+    // slt[t]: the slot in which token t selects this expert, -1 if it does not
+    short slt[MAXT];
+    FOR_UNROLL (short t = 0; t < MAXT; t++) {
+        const uint bits = t < args.nei1 ? (uint) ((mask >> (t*args.nei0)) & ((1ul << args.nei0) - 1)) : 0u;
+        slt[t] = bits ? (short) ctz(bits) : (short) -1;
+    }
+
+    const short NSG = FC_mul_mv_nsg;
+    const int first_row = (tgpig.x*NSG + sgitg)*NR0;
+
+    device const block_nvfp4 * x = (device const block_nvfp4 *) (src0s + e*args.nb02 + first_row*args.nb01);
+
+    const int nb   = args.ne00/QK_NVFP4;
+    const int ns01 = args.nb01/args.nb00;
+
+    float sumf[NR0][MAXT];
+    FOR_UNROLL (short r = 0; r < NR0; r++) {
+        FOR_UNROLL (short j = 0; j < MAXT; j++) {
+            sumf[r][j] = 0.f;
+        }
+    }
+
+    for (int u = tiisg; u < 2*nb; u += 32) {
+        const int ib = u >> 1;
+        const int h  = u & 1;
+
+        half4  w[NR0][8];
+        float  sa[NR0];
+        float  sb[NR0];
+
+        FOR_UNROLL (short r = 0; r < NR0; r++) {
+            device const block_nvfp4 & xb = x[r*ns01 + ib];
+            device const uint32_t    * qw = (device const uint32_t *) (xb.qs + 16*h);
+            const uint32_t w0 = qw[0];
+            const uint32_t w1 = qw[1];
+            const uint32_t w2 = qw[2];
+            const uint32_t w3 = qw[3];
+            w[r][0] = half4(mxfp4_lo4(w0)); w[r][1] = half4(mxfp4_lo4(w1)); w[r][2] = half4(mxfp4_hi4(w0)); w[r][3] = half4(mxfp4_hi4(w1));
+            w[r][4] = half4(mxfp4_lo4(w2)); w[r][5] = half4(mxfp4_lo4(w3)); w[r][6] = half4(mxfp4_hi4(w2)); w[r][7] = half4(mxfp4_hi4(w3));
+            sa[r] = nvfp4_scale_div256(xb.d[2*h    ]);
+            sb[r] = nvfp4_scale_div256(xb.d[2*h + 1]);
+        }
+
+        FOR_UNROLL (short j = 0; j < MAXT; j++) {
+            if (slt[j] >= 0) {
+                device const float4 * y4 = (device const float4 *) (src1 + (slt[j] % args.ne11)*args.nb11 + j*args.nb12) + ib*16 + h*8;
+
+                float4 yl[8];
+                FOR_UNROLL (short k = 0; k < 8; k++) {
+                    yl[k] = y4[k];
+                }
+
+                FOR_UNROLL (short r = 0; r < NR0; r++) {
+                    const float4 a = yl[0]*float4(w[r][0]) + yl[1]*float4(w[r][1]) + yl[2]*float4(w[r][2]) + yl[3]*float4(w[r][3]);
+                    const float4 b = yl[4]*float4(w[r][4]) + yl[5]*float4(w[r][5]) + yl[6]*float4(w[r][6]) + yl[7]*float4(w[r][7]);
+                    sumf[r][j] += sa[r]*((a[0] + a[1]) + (a[2] + a[3])) + sb[r]*((b[0] + b[1]) + (b[2] + b[3]));
+                }
+            }
+        }
+    }
+
+    FOR_UNROLL (short j = 0; j < MAXT; j++) {
+        if (slt[j] >= 0) {
+            device float * dst_f32 = (device float *) dst + (uint64_t) slt[j]*args.ne0 + (uint64_t) j*args.ne1*args.ne0;
+            FOR_UNROLL (short r = 0; r < NR0; r++) {
+                const float s = simd_sum(sumf[r][j]);
+                if (tiisg == 0 && first_row + r < args.ne0) {
+                    dst_f32[first_row + r] = s*4194304.0f;
+                }
+            }
+        }
+    }
+}
+
+typedef decltype(kernel_mul_mv_id_nvfp4_grouped<2, 8>) kernel_mul_mv_id_nvfp4_grouped_t;
+
+template [[host_name("kernel_mul_mv_id_nvfp4_f32_grouped")]] kernel kernel_mul_mv_id_nvfp4_grouped_t kernel_mul_mv_id_nvfp4_grouped<N_R0_NVFP4, 8>;
+
 template [[host_name("kernel_mul_mv_id_q2_K_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q2_K_f32_impl   <N_R0_Q2_K>>>;
 template [[host_name("kernel_mul_mv_id_q3_K_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q3_K_f32_impl   <N_R0_Q3_K>>>;
 template [[host_name("kernel_mul_mv_id_q4_K_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q4_K_f32_impl   <N_R0_Q4_K>>>;
