@@ -1530,6 +1530,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
             }
     };
 
+    if (const char * e = getenv("GGML_METAL_MVID_NSG")) {
+        nsg = atoi(e);
+    }
+
     snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), suffix);
     snprintf(name, 256, "%s_nsg=%d_split=%d", base, nsg, split);
 
