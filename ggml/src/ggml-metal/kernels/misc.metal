@@ -560,35 +560,43 @@ typedef decltype(kernel_loop_ctrl<half>)  kernel_loop_ctrl_f16_t;
 template [[host_name("kernel_loop_ctrl_f32")]] kernel kernel_loop_ctrl_f32_t kernel_loop_ctrl<float>;
 template [[host_name("kernel_loop_ctrl_f16")]] kernel kernel_loop_ctrl_f16_t kernel_loop_ctrl<half>;
 
-// one token, threadgroup q of 1024 threads: states = [pre (K - 1 normed rows), rms_norm(cur)],
-// w = softmax(scale*states q), dst[:, q] = states w
+// threadgroup (q, t): states = [pre[t] (K - 1 normed rows), rms_norm(cur[t])], w = softmax(scale*states q),
+// dst[:, q, t] = states w
 kernel void kernel_mix_f32(
         constant ggml_metal_kargs_mix & args,
         device const float * cur,
         device const float * pre,
         device const float * q,
         device       float * dst,
-        uint    tgpig [[threadgroup_position_in_grid]],
-        ushort  tpitg [[thread_position_in_threadgroup]],
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort3 tpit3 [[thread_position_in_threadgroup]],
         ushort  tiisg [[thread_index_in_simdgroup]],
-        ushort  sgitg [[simdgroup_index_in_threadgroup]]) {
+        ushort  sgitg [[simdgroup_index_in_threadgroup]],
+        ushort3 ntg3  [[threads_per_threadgroup]]) {
     constexpr int KMAX = 16;
+    const int tpitg = tpit3.x;
+    const int ntg   = ntg3.x;
     threadgroup float red[32][KMAX + 1];
     threadgroup float wts[KMAX + 1];
 
-    const int C = args.C;
-    const int K = args.K;
-    device const float * qr = q + (int64_t) tgpig*C;
+    const int C  = args.C;
+    const int K  = args.K;
+    const int iq = tgpig.x;
+    const int t  = tgpig.y;
+
+    device const float * qr = q   + (int64_t) iq*C;
+    device const float * cr = cur + (int64_t) t*C;
+    device const float * pr = pre + (int64_t) t*(K - 1)*C;
 
     float acc[KMAX + 1];
     for (int k = 0; k <= KMAX; ++k) {
         acc[k] = 0.0f;
     }
-    for (int c = tpitg; c < C; c += 1024) {
+    for (int c = tpitg; c < C; c += ntg) {
         const float qv = qr[c];
-        const float cv = cur[c];
+        const float cv = cr[c];
         for (int k = 0; k < K - 1; ++k) {
-            acc[k] += pre[(int64_t) k*C + c]*qv;
+            acc[k] += pr[(int64_t) k*C + c]*qv;
         }
         acc[K - 1] += cv*qv;
         acc[KMAX]  += cv*cv;
@@ -602,8 +610,9 @@ kernel void kernel_mix_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sgitg == 0) {
+        const int nsg = ntg/32;
         for (int k = 0; k <= KMAX; ++k) {
-            const float v = simd_sum(red[tiisg][k]);
+            const float v = simd_sum(tiisg < nsg ? red[tiisg][k] : 0.0f);
             if (tiisg == 0) {
                 wts[k] = v;
             }
@@ -630,11 +639,11 @@ kernel void kernel_mix_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float rn = wts[KMAX];
-    device float * dr = dst + (int64_t) tgpig*C;
-    for (int c = tpitg; c < C; c += 1024) {
-        float v = wts[K - 1]*cur[c]*rn;
+    device float * dr = dst + ((int64_t) t*args.NQ + iq)*C;
+    for (int c = tpitg; c < C; c += ntg) {
+        float v = wts[K - 1]*cr[c]*rn;
         for (int k = 0; k < K - 1; ++k) {
-            v += wts[k]*pre[(int64_t) k*C + c];
+            v += wts[k]*pr[(int64_t) k*C + c];
         }
         dr[c] = v;
     }

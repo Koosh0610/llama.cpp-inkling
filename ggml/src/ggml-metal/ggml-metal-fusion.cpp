@@ -947,8 +947,13 @@ static const std::vector<ggml_op> ops_mix = {
     GGML_OP_RMS_NORM, GGML_OP_CONCAT, GGML_OP_CONCAT, GGML_OP_MUL_MAT, GGML_OP_SOFT_MAX, GGML_OP_MUL_MAT
 };
 
-// one token: nc = rms_norm(cur) | states_t = concat(pre_t, nc, 0) | states = concat(pre, nc, 1) |
-// scores = states^T q | softmax | states_t^T w. the kernel reads pre and cur only
+// several tokens repeat the queries over the batch first
+static const std::vector<ggml_op> ops_mix_rep = {
+    GGML_OP_RMS_NORM, GGML_OP_CONCAT, GGML_OP_CONCAT, GGML_OP_REPEAT, GGML_OP_MUL_MAT, GGML_OP_SOFT_MAX, GGML_OP_MUL_MAT
+};
+
+// per token: nc = rms_norm(cur) | states_t = concat(pre_t, nc, 0) | states = concat(pre, nc, 1) |
+// [queries = repeat(q)] | scores = states^T queries | softmax | states_t^T w. the kernel reads pre, cur and q only
 static bool ggml_metal_fusion_check_mix(
         const ggml_metal_fusion       * fusion,
         const ggml_tensor * const     * n,
@@ -957,40 +962,49 @@ static bool ggml_metal_fusion_check_mix(
               int                       idx,
               ggml_metal_fusion_mode    mode) {
     GGML_UNUSED(mode);
-    GGML_UNUSED(fusion);
 
     if (getenv("GGML_METAL_NO_MIX")) {
         return false;
     }
-    if (!ggml_metal_fusion_raw_span_ok(gf, node_idxs, idx, 6, 0, nullptr)) {
+
+    const int nops = (int) fusion->ops.size();
+    if (!ggml_metal_fusion_raw_span_ok(gf, node_idxs, idx, nops, 0, nullptr)) {
         return false;
     }
+
+    const bool rep = nops == 7;
 
     const ggml_tensor * nc = n[0];
     const ggml_tensor * st = n[1];
     const ggml_tensor * s  = n[2];
-    const ggml_tensor * sc = n[3];
-    const ggml_tensor * sm = n[4];
-    const ggml_tensor * o  = n[5];
+    const ggml_tensor * sc = n[rep ? 4 : 3];
+    const ggml_tensor * sm = n[rep ? 5 : 4];
+    const ggml_tensor * o  = n[rep ? 6 : 5];
 
     const auto is_nc = [&](const ggml_tensor * t) { return t == nc || (t && t->view_src == nc); };
 
     const int64_t C = nc->ne[0];
+    const int64_t T = nc->ne[2];
     const ggml_tensor * pre = s->src[0];
-    const ggml_tensor * q   = sc->src[1];
+    const ggml_tensor * q   = rep ? n[3]->src[0] : sc->src[1];
     const int64_t K  = s->ne[1];
     const int64_t NQ = q->ne[1];
+
+    if (rep && sc->src[1] != n[3]) {
+        return false;
+    }
 
     float max_bias;
     memcpy(&max_bias, (const float *) sm->op_params + 1, sizeof(float));
 
-    return nc->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(nc->src[0]) && ggml_nelements(nc) == C && nc->ne[1] == 1 &&
-        ggml_get_op_params_i32(st, 0) == 0 && is_nc(st->src[1]) && st->ne[1] == C &&
-        ggml_get_op_params_i32(s,  0) == 1 && is_nc(s->src[1])  && s->ne[0] == C && s->ne[2] == 1 &&
-        pre->type == GGML_TYPE_F32 && ggml_is_contiguous(pre) && pre->ne[0] == C && pre->ne[1] == K - 1 &&
-        sc->src[0] == s && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) && q->ne[0] == C && q->ne[2] == 1 &&
+    return nc->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(nc->src[0]) && nc->ne[1] == 1 && nc->ne[3] == 1 &&
+        ggml_get_op_params_i32(st, 0) == 0 && is_nc(st->src[1]) && st->ne[1] == C && st->ne[2] == T &&
+        ggml_get_op_params_i32(s,  0) == 1 && is_nc(s->src[1])  && s->ne[0] == C && s->ne[2] == T &&
+        pre->type == GGML_TYPE_F32 && ggml_is_contiguous(pre) && pre->ne[0] == C && pre->ne[1] == K - 1 && pre->ne[2] == T &&
+        sc->src[0] == s && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) && q->ne[0] == C && q->ne[2] == 1 && q->ne[3] == 1 &&
         sm->src[0] == sc && sm->src[1] == nullptr && sm->src[2] == nullptr && max_bias == 0.0f &&
-        o->src[0] == st && o->src[1] == sm && o->type == GGML_TYPE_F32 && ggml_is_contiguous(o) && o->ne[0] == C && o->ne[1] == NQ &&
+        o->src[0] == st && o->src[1] == sm && o->type == GGML_TYPE_F32 && ggml_is_contiguous(o) &&
+        o->ne[0] == C && o->ne[1] == NQ && o->ne[2] == T &&
         K <= 16 && NQ <= 8;
 }
 
@@ -1227,7 +1241,8 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
 
     { GGML_METAL_FUSION_CONV_RES, ops_conv_res, {}, true, ggml_metal_fusion_check_conv_res },
 
-    { GGML_METAL_FUSION_MIX, ops_mix, {}, true, ggml_metal_fusion_check_mix },
+    { GGML_METAL_FUSION_MIX, ops_mix,     {}, true, ggml_metal_fusion_check_mix },
+    { GGML_METAL_FUSION_MIX, ops_mix_rep, {}, true, ggml_metal_fusion_check_mix },
 };
 
 // ---- alloc deps -----------------------------------------------------------

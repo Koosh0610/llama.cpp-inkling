@@ -748,6 +748,7 @@ typedef struct {
 typedef struct {
     int32_t  C;     // channels
     int32_t  K;     // states including cur
+    int32_t  NQ;    // queries
     float    eps;
     float    scale; // softmax scale
 } ggml_metal_kargs_mix;
