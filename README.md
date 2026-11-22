@@ -2,6 +2,8 @@
 
 llama.cpp tuned for Inkling 2 Mini on a base Apple M5 (10-core GPU, 24 GB unified memory). No change trades away quality.
 
+**Write-up with diagrams of every change: https://koosh0610.github.io/llama.cpp-inkling/**
+
 | Inkling 2 Mini UD-Q3_K_XL, base M5 | prefill (pp512) | decode |
 |---|---|---|
 | upstream llama.cpp [1] | 42.8 tok/s | 15.9 tok/s |
