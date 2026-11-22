@@ -393,6 +393,8 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
         const int64_t n_kv     = rel_pos->ne[0];
 
         ggml_tensor * sinks = build_lora_mm(layer.attn_sink_proj, inputs[0]);
+        // emitted early so the bias ops below stay consecutive for the Metal fusion
+        ggml_build_forward_expand(gf, sinks);
 
         // project r on the bias table first, then gather by distance: only the gathered bias is n_kv x n_tokens x n_head
         ggml_tensor * table = ggml_mul_mat(ctx0, ggml_pad(ctx0, layer.attn_rel_bias, 0, 1, 0, 0), Rcur);
@@ -460,6 +462,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
 
     cur = ggml_add(ctx0, ffn_inp, cur);
     cb(cur, "l_out", il);
+
+    // emit the layer tail right after its conv state store, before the next layer's nodes
+    ggml_build_forward_expand(gf, cur);
 
     return cur;
 }
