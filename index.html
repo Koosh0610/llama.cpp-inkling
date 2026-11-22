@@ -1,0 +1,1124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Do we need our own engine? Inkling 2 Mini in llama.cpp on a base M5</title>
+<meta name="description" content="Every change that took Inkling 2 Mini from 15.9 to 28.4 tokens/s decode and from 42.8 to 362 tokens/s prefill in llama.cpp on a base Apple M5, what did not work, and how close it gets to the memory bandwidth limit.">
+<meta name="author" content="Koosh0610">
+<link rel="canonical" href="https://koosh0610.github.io/llama.cpp-inkling/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Do we need our own engine? Inkling 2 Mini in llama.cpp on a base M5">
+<meta property="og:description" content="Native NVFP4 Metal kernels, model-specific fusions and a wider graph reorder: 8.5x faster prefill and 1.8x faster decode than upstream llama.cpp on a base M5.">
+<meta property="og:url" content="https://koosh0610.github.io/llama.cpp-inkling/">
+<style>
+:root {
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --line: #c3c2b7; --box: #f0efec;
+  --blue: #2a78d6; --blue-soft: #e3eefb; --orange: #eb6834; --orange-soft: #fce9df;
+  --gray: #a3a19a; --gray-soft: #ebeae5; --code: #efeee9; --border: rgba(11,11,11,.10); --link: #1c5cab;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #111110; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8f8d86;
+    --grid: #2c2c2a; --axis: #4a4945; --line: #55544e; --box: #252523;
+    --blue: #3987e5; --blue-soft: #1c2e45; --orange: #d95926; --orange-soft: #3b2318;
+    --gray: #6e6c66; --gray-soft: #2b2b29; --code: #232321; --border: rgba(255,255,255,.10); --link: #86b6ef;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #111110; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8f8d86;
+  --grid: #2c2c2a; --axis: #4a4945; --line: #55544e; --box: #252523;
+  --blue: #3987e5; --blue-soft: #1c2e45; --orange: #d95926; --orange-soft: #3b2318;
+  --gray: #6e6c66; --gray-soft: #2b2b29; --code: #232321; --border: rgba(255,255,255,.10); --link: #86b6ef;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 18px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+main { max-width: 720px; margin: 0 auto; padding: 8px 16px 72px; }
+h1 { font-size: 2.15rem; line-height: 1.15; letter-spacing: -0.015em; margin: 40px 0 12px; }
+h2 { font-size: 1.45rem; line-height: 1.25; margin: 60px 0 14px; }
+h3 { font-size: 1.12rem; line-height: 1.3; margin: 36px 0 10px; }
+h4 { font-size: 1rem; margin: 28px 0 6px; }
+p, ul, ol { margin: 0 0 1em; }
+ul, ol { padding-left: 1.3em; }
+li { margin: 0.25em 0; }
+a { color: var(--link); text-underline-offset: 2px; text-decoration-thickness: 1px; }
+strong { font-weight: 650; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { font-size: 0.84em; background: var(--code); padding: 0.08em 0.32em; border-radius: 4px; overflow-wrap: anywhere; }
+pre { background: var(--code); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 13.5px; line-height: 1.5; margin: 0 0 1.2em; }
+pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+a.c { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.84em; }
+.dek { font-size: 1.15rem; color: var(--ink-2); margin: 0 0 14px; }
+.byline { font-size: 15px; color: var(--ink-2); margin: 0 0 28px; }
+.box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px 6px; margin: 0 0 28px; }
+.box h2 { font-size: 1rem; margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-2); }
+nav.toc ol { columns: 2; column-gap: 28px; font-size: 16px; padding-left: 1.2em; }
+nav.toc li { margin: 0.15em 0; break-inside: avoid; }
+figure { margin: 30px 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 16px 12px; }
+figure svg { display: block; width: 100%; height: auto; max-width: 560px; margin: 0 auto; }
+figcaption { font-size: 15px; line-height: 1.5; color: var(--ink-2); margin: 12px 4px 0; }
+figcaption b { color: var(--ink); font-weight: 650; }
+details.data { margin: 10px 4px 0; font-size: 14px; overflow-x: auto; }
+details.data summary { cursor: pointer; color: var(--ink-2); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; font-variant-numeric: tabular-nums; margin: 0 0 1.2em; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { font-weight: 650; border-bottom: 1px solid var(--axis); }
+td.n, th.n { text-align: right; white-space: nowrap; }
+tr.hi td { font-weight: 650; }
+details.data table { margin: 8px 0 4px; font-size: 14px; }
+.wide { overflow-x: auto; }
+.note { font-size: 15px; color: var(--ink-2); }
+footer { max-width: 720px; margin: 0 auto; padding: 0 16px 48px; font-size: 14px; color: var(--ink-2); }
+@media (max-width: 600px) {
+  body { font-size: 17px; }
+  h1 { font-size: 1.8rem; margin-top: 28px; }
+  nav.toc ol { columns: 1; }
+  figure { margin-left: -16px; margin-right: -16px; border-radius: 0; border-left: 0; border-right: 0; padding: 14px 6px 10px; }
+  figcaption, details.data { margin-left: 10px; margin-right: 10px; }
+  table { font-size: 14px; }
+  th, td { padding: 6px 5px; }
+}
+.d text { fill: var(--ink); font-size: 14px; }
+.d .s10 { font-size: 10px; } .d .s11 { font-size: 11px; } .d .s12 { font-size: 12px; } .d .s13 { font-size: 13px; } .d .s15 { font-size: 15px; }
+.d .b { font-weight: 650; }
+.d .t2 { fill: var(--ink-2); }
+.d .tm { fill: var(--muted); }
+.d .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.d .bx { fill: var(--box); stroke: var(--line); stroke-width: 1; }
+.d .bxb { fill: var(--blue-soft); stroke: var(--blue); stroke-width: 1.5; }
+.d .bxo { fill: var(--orange-soft); stroke: var(--orange); stroke-width: 1.5; }
+.d .bxd { fill: var(--surface); stroke: var(--blue); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.d .fz { fill: var(--blue-soft); stroke: var(--blue); stroke-width: 2; }
+.d .cs { fill: var(--orange-soft); stroke: var(--orange); stroke-width: 1; }
+.d .cn { fill: var(--blue-soft); stroke: var(--blue); stroke-width: 1; }
+.d .sep { stroke: var(--blue); stroke-width: 1; opacity: .35; }
+.d .tag { fill: var(--surface); stroke: var(--blue); stroke-width: 1.2; }
+.d .fb { fill: var(--blue); } .d .fo { fill: var(--orange); } .d .fg { fill: var(--gray); } .d .fm { fill: var(--muted); }
+.d .op45 { opacity: .45; }
+.d .op { fill: var(--gray); }
+.d .nz { fill: var(--gray-soft); }
+.d .skipb { fill: var(--gray-soft); stroke: var(--line); stroke-width: 1; }
+.d .sgb { fill: var(--blue-soft); stroke: var(--blue); stroke-width: 1; }
+.d .sgo { fill: var(--orange-soft); stroke: var(--orange); stroke-width: 1; }
+.d .sgg { fill: var(--gray-soft); stroke: var(--line); stroke-width: 1; }
+.d .ln { fill: none; stroke: var(--ink-2); stroke-width: 1.5; }
+.d .lm { fill: none; stroke: var(--muted); stroke-width: 1; }
+.d .lmd { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
+.d .lb { fill: none; stroke: var(--blue); stroke-width: 2; }
+.d .ceil { stroke: var(--ink-2); stroke-width: 2; }
+.d .bar { stroke: var(--orange); stroke-width: 2.5; }
+.d .gr { stroke: var(--grid); stroke-width: 1; }
+.d .ax { stroke: var(--axis); stroke-width: 1; }
+.d .mk { fill: var(--ink-2); } .d .mkb { fill: var(--blue); }
+.d .dot0 { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.5; }
+.d .ring { stroke: var(--surface); stroke-width: 2; }
+</style>
+</head>
+<body>
+<main>
+<article>
+<header>
+<h1>Do we need our own engine?</h1>
+<p class="dek">Inkling 2 Mini in llama.cpp on a base Apple M5: every change that took it from 15.9 to 28.4 tokens/s, what did not work, and how close it gets to the hardware.</p>
+<p class="byline">By Koosh0610 · November 2026 · Code: <a href="https://github.com/Koosh0610/llama.cpp-inkling">Koosh0610/llama.cpp-inkling</a></p>
+</header>
+
+<section class="box" aria-labelledby="tldr">
+<h2 id="tldr">Short version</h2>
+<ul>
+<li>Upstream llama.cpp has no Metal kernels for NVFP4, the format Inkling 2 Mini's experts ship in, so on a Mac the experts ran on the CPU: 42.8 tokens/s prefill and 15.9 tokens/s decode on a base M5.</li>
+<li>Native NVFP4 kernels moved the experts to the GPU (251 / 24.2). After that, decode time tracked the number of memory-barrier levels per token, about 1.5 µs each, not the number of kernel launches.</li>
+<li>Fusions written for this model and a wider graph reorder cut barrier levels per token from 3,257 to 1,783. Final result: 362 tokens/s prefill and 28.4 tokens/s decode, 78% of what the memory bandwidth allows, with the same output quality as upstream.</li>
+<li>All of it fit inside llama.cpp's existing structure. We did not need our own engine.</li>
+</ul>
+</section>
+
+<nav class="toc" aria-label="Contents">
+<ol>
+<li><a href="#question">The question</a></li>
+<li><a href="#setup">Model, Mac, baseline</a></li>
+<li><a href="#measuring">How we measured</a></li>
+<li><a href="#nvfp4">NVFP4 kernels</a></li>
+<li><a href="#fusions">Fusing the small ops</a></li>
+<li><a href="#reorder">A wider reorder</a></li>
+<li><a href="#mix">The depth mix</a></li>
+<li><a href="#nov22">The last stretches</a></li>
+<li><a href="#progress">Progress, change by change</a></li>
+<li><a href="#didnt">What did not work</a></li>
+<li><a href="#spec">Speculative decoding</a></li>
+<li><a href="#mlx">MLX, side by side</a></li>
+<li><a href="#roofline">How close to the limit</a></li>
+<li><a href="#caveats">Caveats</a></li>
+<li><a href="#verdict">So, our own engine?</a></li>
+<li><a href="#credits">Credits</a></li>
+<li><a href="#commits">Appendix: every commit</a></li>
+</ol>
+</nav>
+
+<section id="question">
+<h2>1. The question</h2>
+<p>We kept hearing that llama.cpp had fallen behind in 2026, and that anyone serious about local inference on a Mac should use MLX or write an engine for their model. We had a concrete case to test that on: Inkling 2 Mini on a base M5 MacBook with 24 GB.</p>
+<p>Out of the box the gap was real. Upstream llama.cpp decoded 15.9 tokens/s and processed a 512-token prompt at 42.8 tokens/s. MLX on the same machine did 27.2–27.7 and 411–421.</p>
+<p>The repo keeps the probes we wrote while weighing a custom engine: a bandwidth test, mat-vec layout prototypes, a persistent-kernel experiment. But when we looked at where llama.cpp spent its time, almost all of it could be fixed in place. This post goes through every change with what it measured; the appendix lists them in build order.</p>
+
+<figure id="fig1">
+<svg class="d" viewBox="0 0 480 252" width="480" height="252" role="img" aria-labelledby="f1t f1d">
+<title id="f1t">Prefill and decode speed on a base M5</title>
+<desc id="f1d">Prefill, pp512: upstream llama.cpp 42.8, MLX 4-bit 411 to 421, this repo 362 tokens per second. Decode, tg128: upstream 15.9, MLX 27.2 to 27.7, this repo 28.4 tokens per second.</desc>
+<text x="0" y="16" class="b s15">Prefill</text><text x="64" y="16" class="t2 s13">pp512, tokens/s</text>
+<text x="134" y="42" text-anchor="end">upstream llama.cpp</text>
+<text x="134" y="72" text-anchor="end">MLX, 4-bit</text>
+<text x="134" y="102" text-anchor="end" class="b">this repo</text>
+<path d="M142,28 H161.8 A4,4 0 0 1 165.8,32 V42 A4,4 0 0 1 161.8,46 H142 Z" class="fg"><title>upstream: 42.8 tok/s</title></path>
+<path d="M142,58 H371.9 A4,4 0 0 1 375.9,62 V72 A4,4 0 0 1 371.9,76 H142 Z" class="fg op45"><title>MLX: 411 to 421 tok/s</title></path>
+<rect x="142" y="58" width="228.3" height="18" class="fg"><title>MLX: 411 to 421 tok/s</title></rect>
+<path d="M142,88 H339.1 A4,4 0 0 1 343.1,92 V102 A4,4 0 0 1 339.1,106 H142 Z" class="fb"><title>this repo: 362 tok/s</title></path>
+<text x="171.8" y="42">42.8</text>
+<text x="381.9" y="72">411–421</text>
+<text x="349.1" y="102" class="b">362</text><text x="379" y="102" class="t2 s13">8.5×</text>
+<line x1="142" y1="24" x2="142" y2="110" class="ax"/>
+<text x="0" y="146" class="b s15">Decode</text><text x="64" y="146" class="t2 s13">tg128, tokens/s</text>
+<text x="134" y="172" text-anchor="end">upstream llama.cpp</text>
+<text x="134" y="202" text-anchor="end">MLX, 4-bit</text>
+<text x="134" y="232" text-anchor="end" class="b">this repo</text>
+<path d="M142,158 H270.5 A4,4 0 0 1 274.5,162 V172 A4,4 0 0 1 270.5,176 H142 Z" class="fg"><title>upstream: 15.9 tok/s</title></path>
+<path d="M142,188 H368.8 A4,4 0 0 1 372.8,192 V202 A4,4 0 0 1 368.8,206 H142 Z" class="fg op45"><title>MLX: 27.2 to 27.7 tok/s</title></path>
+<rect x="142" y="188" width="226.7" height="18" class="fg"><title>MLX: 27.2 to 27.7 tok/s</title></rect>
+<path d="M142,218 H374.7 A4,4 0 0 1 378.7,222 V232 A4,4 0 0 1 374.7,236 H142 Z" class="fb"><title>this repo: 28.4 tok/s</title></path>
+<text x="280.5" y="172">15.9</text>
+<text x="378.8" y="202">27.2–27.7</text>
+<text x="384.7" y="232" class="b">28.4</text><text x="420" y="232" class="t2 s13">1.8×</text>
+<line x1="142" y1="154" x2="142" y2="240" class="ax"/>
+</svg>
+<figcaption><b>Figure 1.</b> Inkling 2 Mini on a base M5 (10-core GPU, 24 GB). Upstream is llama.cpp at 46eb174 plus the required fix #32704; llama-bench, flash attention. MLX is mlx-community/Inkling-2-Mini-4bit with mlx-lm PR #2086, a different quant (4-bit attention); the lighter bar ends show its measured range.</figcaption>
+<details class="data"><summary>Data table</summary>
+<table><thead><tr><th>setup</th><th class="n">prefill, pp512</th><th class="n">decode, tg128</th></tr></thead>
+<tbody><tr><td>upstream llama.cpp</td><td class="n">42.8</td><td class="n">15.9</td></tr>
+<tr><td>MLX, 4-bit</td><td class="n">411–421</td><td class="n">27.2–27.7</td></tr>
+<tr><td>this repo</td><td class="n">362</td><td class="n">28.4</td></tr></tbody></table>
+</details>
+</figure>
+
+<p>In a side-by-side <code>llama-server</code> test on the same model file, upstream decoded 16.9–17.8 tokens/s and this repo 28.8–29.0.</p>
+<p>The repo is a fork of llama.cpp at 46eb174. Each change is one commit with its measurement in the message, so <code>git log --reverse</code> reads as the story; the commit links below point there, and the tag <a href="https://github.com/Koosh0610/llama.cpp-inkling/tree/m5-benchmarked-build">m5-benchmarked-build</a> is the exact tree we benchmarked.</p>
+</section>
+
+<section id="setup">
+<h2>2. Model, Mac, baseline</h2>
+<h3>The model</h3>
+<p>Inkling 2 Mini is a mixture-of-experts model with 24 layers of weights whose middle layers loop: layers 6 to 17 run three times, so every token makes 48 layer visits (Figure 2). Each visit routes the token to 8 of 128 experts. The hidden state is 2,304 wide.</p>
+<p>Three things about it matter for speed:</p>
+<ul>
+<li><strong>The loop adds reads, not weights.</strong> The 12 core layers are streamed from memory three times per token.</li>
+<li><strong>A lot of small vector work.</strong> There is no RoPE: positions come from a relative-position bias with attention sinks. Q, K and the relative-position queries are clipped to a maximum L2 norm. K, V, the attention output and the MoE output each pass through a short causal convolution that keeps state. Instead of a plain residual add, a <em>depth mix</em> attends over earlier block outputs with learned queries. In passes 2 and 3, <em>loop controllers</em> (a rank-64 projection followed by two tanh-gated mat-vecs) mix a message from the previous pass into each layer's inputs.</li>
+<li><strong>New number formats.</strong> The experts ship in NVFP4 (layers 0–19) and MXFP8 (layers 20–23).</li>
+</ul>
+
+<figure id="fig2">
+<svg class="d" viewBox="0 0 480 490" width="480" height="490" role="img" aria-labelledby="f2t f2d">
+<title id="f2t">The token path through Inkling 2 Mini</title>
+<desc id="f2d">Token embedding, layers 0 to 5, then layers 6 to 17 three times, then layers 18 to 23, a final depth mix and the output head. Every pass over layers 6 to 17 starts from the output of layer 5; passes 2 and 3 also take messages from the previous pass through loop controllers. 6 plus 36 plus 6 is 48 layer visits per token.</desc>
+<defs><marker id="m2" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker></defs>
+<rect x="136" y="4" width="208" height="30" rx="6" class="bx"/>
+<text x="240" y="24" text-anchor="middle" class="s13">token embedding + norm</text>
+<line x1="240" y1="34" x2="240" y2="50" class="ln" marker-end="url(#m2)"/>
+<rect x="136" y="50" width="208" height="32" rx="6" class="bx"/>
+<text x="240" y="71" text-anchor="middle">layers 0–5</text>
+<text x="358" y="71" class="t2 s13">6 visits</text>
+<polyline points="240,82 240,98 118,98 118,268" class="ln"/>
+<text x="110" y="176" text-anchor="end" class="t2 s12">layer-5 output</text>
+<text x="110" y="191" text-anchor="end" class="t2 s12">is the input</text>
+<text x="110" y="206" text-anchor="end" class="t2 s12">of every pass</text>
+<line x1="118" y1="131" x2="136" y2="131" class="ln" marker-end="url(#m2)"/>
+<line x1="118" y1="199" x2="136" y2="199" class="ln" marker-end="url(#m2)"/>
+<line x1="118" y1="268" x2="136" y2="268" class="ln" marker-end="url(#m2)"/>
+<rect x="136" y="114" width="208" height="34" rx="6" class="bxb"/>
+<text x="240" y="136" text-anchor="middle">pass 1 · layers 6–17</text>
+<line x1="240" y1="148" x2="240" y2="180" class="ln" marker-end="url(#m2)"/>
+<text x="248" y="168" class="t2 s12">messages</text>
+<rect x="136" y="180" width="208" height="38" rx="6" class="bxb"/>
+<text x="240" y="197" text-anchor="middle">pass 2 · layers 6–17</text>
+<text x="240" y="212" text-anchor="middle" class="t2 s12">+ loop controllers</text>
+<line x1="240" y1="218" x2="240" y2="250" class="ln" marker-end="url(#m2)"/>
+<text x="248" y="238" class="t2 s12">messages</text>
+<rect x="136" y="250" width="208" height="38" rx="6" class="bxb"/>
+<text x="240" y="267" text-anchor="middle">pass 3 · layers 6–17</text>
+<text x="240" y="282" text-anchor="middle" class="t2 s12">+ loop controllers</text>
+<path d="M350,114 H356 V288 H350" class="ln"/>
+<text x="364" y="178" class="s13">12 layers × 3</text>
+<text x="364" y="194" class="s13">= 36 visits</text>
+<text x="364" y="218" class="t2 s12">same weights,</text>
+<text x="364" y="233" class="t2 s12">read 3 times</text>
+<line x1="240" y1="288" x2="240" y2="312" class="ln" marker-end="url(#m2)"/>
+<rect x="136" y="312" width="208" height="32" rx="6" class="bx"/>
+<text x="240" y="333" text-anchor="middle">layers 18–23</text>
+<text x="358" y="333" class="t2 s13">6 visits</text>
+<line x1="240" y1="344" x2="240" y2="362" class="ln" marker-end="url(#m2)"/>
+<rect x="136" y="362" width="208" height="32" rx="6" class="bx"/>
+<text x="240" y="383" text-anchor="middle">depth mix + norm</text>
+<text x="358" y="378" class="b s13">48 visits</text>
+<text x="358" y="393" class="t2 s12">per token</text>
+<line x1="240" y1="394" x2="240" y2="412" class="ln" marker-end="url(#m2)"/>
+<rect x="136" y="412" width="208" height="32" rx="6" class="bx"/>
+<text x="240" y="433" text-anchor="middle" class="s13">output head · Q5_K, 318 MB</text>
+<line x1="240" y1="444" x2="240" y2="462" class="ln" marker-end="url(#m2)"/>
+<text x="240" y="480" text-anchor="middle" class="t2 s13">logits</text>
+</svg>
+<figcaption><b>Figure 2.</b> One token's path, from <code>inkling2-loop.cpp</code>. Each pass over the core restarts from layer 5's output; passes 2 and 3 also receive messages, a depth mix over the previous pass's block outputs, through the loop controllers. The core's weights are read three times per token.</figcaption>
+</figure>
+
+<p>We ran Unsloth's <a href="https://huggingface.co/unsloth/Inkling-2-Mini-GGUF">UD-Q3_K_XL GGUF</a> (13.6 GB). It keeps most experts in NVFP4 as released but cuts 8 of the 40 NVFP4 expert tensors to 2–3.4 bits and the MXFP8 layers to 3–4.5 bits. Attention is Q8_0 and the output head is Q5_K (318 MB).</p>
+
+<h3>The Mac</h3>
+<p>A base M5 MacBook: 10-core GPU and 24 GB of unified memory, which the CPU and GPU share. The nominal memory bandwidth is 153 GB/s; the best streaming read we measured from a Metal kernel was about 125 GB/s. That number sets the ceiling for decode, because every token has to read every active weight once.</p>
+
+<h3>The baseline</h3>
+<p>Upstream llama.cpp at 46eb174, plus one fix. Without upstream PR <a href="https://github.com/ggml-org/llama.cpp/pull/32704">#32704</a> (merged a few hours after 46eb174), the copies of the core layers used by passes 2 and 3 are made before the per-expert scale tensors are attached, so those passes run the NVFP4 experts unscaled and the model outputs gibberish (perplexity about 67 instead of 4.4). The fix re-shares the loop slots after the scale pass (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/0f29f91">0f29f91</a>). Every number in this post includes it.</p>
+<p>With it, upstream measured 42.8 tokens/s prefill (pp512) and 15.9 tokens/s decode (tg128) with flash attention. The cause is one line in ggml's Metal backend: <code>ggml_metal_supports_mul_mat_op</code> returned false for NVFP4. The scheduler therefore ran the NVFP4 expert mat-vecs on the CPU, and the graph bounced between the GPU and CPU backends in every layer.</p>
+</section>
+
+<section id="measuring">
+<h2>3. How we measured</h2>
+<p>Tools first, because the first tool we trusted pointed us the wrong way.</p>
+<ul>
+<li><strong>Speed:</strong> llama-bench pp512 and tg128 with flash attention. Run-to-run noise was about ±0.6 tokens/s, so anything under about 2% was checked with an interleaved A/B in the same time window: the two builds alternate, eight rounds each.</li>
+<li><strong>Power state:</strong> on battery, Low Power Mode off. Low Power Mode cut bandwidth to about 80 GB/s and invalidated an hour of results before we noticed; after that we checked it before every run.</li>
+<li><strong>Quality:</strong> <code>dcheck</code>, a greedy decoder that saves the logits of every step and compares them with a reference (largest logit difference, mean KL divergence, first top-1 divergence) on three prompts, plus perplexity and KL divergence against upstream at milestones.</li>
+</ul>
+
+<h3>The profiler</h3>
+<p>We added a GPU timestamp profiler (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/48a4afd">48a4afd</a>): the whole graph goes into one command buffer, with one compute encoder per fusion group and GPU timestamps at each encoder's start and end. A command buffer is the unit of work the CPU submits to the GPU; an encoder records the kernel dispatches inside it. Figure 3 is one decode token at full power, right after the NVFP4 kernels landed.</p>
+
+<figure id="fig3">
+<svg class="d" viewBox="0 0 480 244" width="480" height="244" role="img" aria-labelledby="f3t f3d">
+<title id="f3t">Where one decode token's 40.6 ms went after the NVFP4 kernels</title>
+<desc id="f3d">GPU timestamp profile at full power: small ops and dispatch about 12.6 ms, NVFP4 experts 11.1 ms, Q8_0 attention 9.8 ms, other expert types 2.6 ms, output head 2.5 ms, F32 router and loop control about 1.7 ms.</desc>
+<text x="0" y="16" class="b s15">One decode token: 40.6 ms</text>
+<text x="0" y="34" class="t2 s13">GPU timestamp profile, right after the NVFP4 kernels</text>
+<text x="166" y="62.5" text-anchor="end">small ops + dispatch</text>
+<text x="166" y="90.5" text-anchor="end">NVFP4 experts</text>
+<text x="166" y="118.5" text-anchor="end">Q8_0 attention</text>
+<text x="166" y="146.5" text-anchor="end">other expert types</text>
+<text x="166" y="174.5" text-anchor="end">output head</text>
+<text x="166" y="202.5" text-anchor="end">F32 router, loop ctrl</text>
+<path d="M174,50 H409.4 A4,4 0 0 1 413.4,54 V62 A4,4 0 0 1 409.4,66 H174 Z" class="fo"><title>small ops + dispatch: about 12.6 ms</title></path>
+<path d="M174,78 H380.9 A4,4 0 0 1 384.9,82 V90 A4,4 0 0 1 380.9,94 H174 Z" class="fb"><title>NVFP4 experts: 11.1 ms</title></path>
+<path d="M174,106 H356.2 A4,4 0 0 1 360.2,110 V118 A4,4 0 0 1 356.2,122 H174 Z" class="fb"><title>Q8_0 attention: 9.8 ms</title></path>
+<path d="M174,134 H219.4 A4,4 0 0 1 223.4,138 V146 A4,4 0 0 1 219.4,150 H174 Z" class="fb"><title>other expert types: 2.6 ms</title></path>
+<path d="M174,162 H217.5 A4,4 0 0 1 221.5,166 V174 A4,4 0 0 1 217.5,178 H174 Z" class="fb"><title>output head: 2.5 ms</title></path>
+<path d="M174,190 H202.3 A4,4 0 0 1 206.3,194 V202 A4,4 0 0 1 202.3,206 H174 Z" class="fb"><title>F32 router and loop control: about 1.7 ms</title></path>
+<text x="419.4" y="62.5" class="s13">~12.6 ms</text>
+<text x="390.9" y="90.5" class="s13">11.1 ms</text>
+<text x="366.2" y="118.5" class="s13">9.8 ms</text>
+<text x="229.4" y="146.5" class="s13">2.6 ms</text>
+<text x="227.5" y="174.5" class="s13">2.5 ms</text>
+<text x="212.3" y="202.5" class="s13">~1.7 ms</text>
+<line x1="174" y1="46" x2="174" y2="210" class="ax"/>
+<rect x="174" y="223" width="12" height="12" rx="2" class="fb"/><text x="192" y="233" class="s13">weight reads</text>
+<rect x="290" y="223" width="12" height="12" rx="2" class="fo"/><text x="308" y="233" class="s13">small ops + dispatch</text>
+</svg>
+<figcaption><b>Figure 3.</b> The profile that started the fusion work (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/48a4afd">48a4afd</a>). The weight-reading kernels add up to 27.7 ms; the parts sum to 40.3 of the 40.6 ms. The orange bar turned out to be inflated by the profiler itself, as explained below.</figcaption>
+<details class="data"><summary>Data table</summary>
+<table><thead><tr><th>bucket</th><th class="n">ms per token</th></tr></thead>
+<tbody><tr><td>small ops and dispatch</td><td class="n">~12.6</td></tr><tr><td>NVFP4 experts</td><td class="n">11.1</td></tr><tr><td>Q8_0 attention</td><td class="n">9.8</td></tr><tr><td>other expert types</td><td class="n">2.6</td></tr><tr><td>output head</td><td class="n">2.5</td></tr><tr><td>F32 router and loop control</td><td class="n">~1.7</td></tr><tr class="hi"><td>total measured</td><td class="n">40.6</td></tr></tbody></table>
+</details>
+</figure>
+
+<p>The largest bucket was not a weight read. Figure 4 shows where those small ops live: between every pair of weight reads in a layer visit there is a stretch of tiny kernels on 2,304-wide vectors (norms, clips, convolutions, the depth mix, the controllers). Multiply that by 48 visits and the decode graph has more than 5,000 nodes.</p>
+
+<figure id="fig4">
+<svg class="d" viewBox="0 0 480 580" width="480" height="580" role="img" aria-labelledby="f4t f4d">
+<title id="f4t">One layer visit: weight reads and the stretches of small ops between them</title>
+<desc id="f4d">A layer visit in loop passes 2 and 3 for one token, top to bottom. Weight reads: Q, K, V, R, gate and sink projections in Q8_0; output projection in Q8_0; router in F16; expert gate_up in NVFP4; expert down in NVFP4. Between them are stretches of small ops, tagged with the fused kernel that now covers them: MIX and LOOP_CTRL before attention; CONV_RES, L2_CLIP and REL_BIAS before flash attention; CONV_TAIL, MIX and LOOP_CTRL after the output projection; SITU between the expert reads; CONV_TAIL at the end.</desc>
+<rect x="20" y="0" width="460" height="66" rx="6" class="bx"/>
+<text x="32" y="19" class="s13">depth mix over earlier blocks</text>
+<rect x="436" y="7" width="34" height="16" rx="8" class="tag"/><text x="453" y="18.5" text-anchor="middle" class="mono s11">MIX</text>
+<text x="32" y="37" class="s13">loop control of the q, k, v inputs</text>
+<rect x="396" y="25" width="74" height="16" rx="8" class="tag"/><text x="433" y="36.5" text-anchor="middle" class="mono s11">LOOP_CTRL</text>
+<text x="32" y="55" class="s13">RMS norms</text>
+<rect x="0" y="72" width="480" height="26" rx="6" class="bxb"/>
+<text x="12" y="90" class="b s13">Q, K, V, R, gate and sink projections</text>
+<text x="468" y="90" text-anchor="end" class="mono s12 t2">Q8_0</text>
+<rect x="20" y="104" width="460" height="102" rx="6" class="bx"/>
+<text x="32" y="123" class="s13">K, V short convolutions + state</text>
+<rect x="403" y="111" width="67" height="16" rx="8" class="tag"/><text x="436.5" y="122.5" text-anchor="middle" class="mono s11">CONV_RES</text>
+<text x="32" y="141" class="s13">L2 clip of q, k and r</text>
+<rect x="410" y="129" width="60" height="16" rx="8" class="tag"/><text x="440" y="140.5" text-anchor="middle" class="mono s11">L2_CLIP</text>
+<text x="32" y="159" class="s13">relative-position bias, sinks, mask</text>
+<rect x="403" y="147" width="67" height="16" rx="8" class="tag"/><text x="436.5" y="158.5" text-anchor="middle" class="mono s11">REL_BIAS</text>
+<text x="32" y="177" class="s13">flash attention over the KV cache</text>
+<text x="32" y="195" class="s13">× sigmoid(gate)</text>
+<rect x="0" y="212" width="480" height="26" rx="6" class="bxb"/>
+<text x="12" y="230" class="b s13">output projection</text>
+<text x="468" y="230" text-anchor="end" class="mono s12 t2">Q8_0</text>
+<rect x="20" y="244" width="460" height="84" rx="6" class="bx"/>
+<text x="32" y="263" class="s13">short conv + residual (attention tail)</text>
+<rect x="396" y="251" width="74" height="16" rx="8" class="tag"/><text x="433" y="262.5" text-anchor="middle" class="mono s11">CONV_TAIL</text>
+<text x="32" y="281" class="s13">depth mix</text>
+<rect x="436" y="269" width="34" height="16" rx="8" class="tag"/><text x="453" y="280.5" text-anchor="middle" class="mono s11">MIX</text>
+<text x="32" y="299" class="s13">loop control of the MoE input</text>
+<rect x="396" y="287" width="74" height="16" rx="8" class="tag"/><text x="433" y="298.5" text-anchor="middle" class="mono s11">LOOP_CTRL</text>
+<text x="32" y="317" class="s13">RMS norm</text>
+<rect x="0" y="334" width="480" height="26" rx="6" class="bxb"/>
+<text x="12" y="352" class="b s13">router: scores for 128 experts</text>
+<text x="468" y="352" text-anchor="end" class="mono s12 t2">F16</text>
+<rect x="20" y="366" width="460" height="30" rx="6" class="bx"/>
+<text x="32" y="385" class="s13">top-8 selection</text>
+<rect x="0" y="402" width="480" height="26" rx="6" class="bxb"/>
+<text x="12" y="420" class="b s13">8 experts: gate_up</text>
+<text x="468" y="420" text-anchor="end" class="mono s12 t2">NVFP4</text>
+<rect x="20" y="434" width="460" height="30" rx="6" class="bx"/>
+<text x="32" y="453" class="s13">SITU activation</text>
+<rect x="430" y="441" width="40" height="16" rx="8" class="tag"/><text x="450" y="452.5" text-anchor="middle" class="mono s11">SITU</text>
+<rect x="0" y="470" width="480" height="26" rx="6" class="bxb"/>
+<text x="12" y="488" class="b s13">8 experts: down</text>
+<text x="468" y="488" text-anchor="end" class="mono s12 t2">NVFP4</text>
+<rect x="20" y="502" width="460" height="48" rx="6" class="bx"/>
+<text x="32" y="521" class="s13">weighted sum of the 8 experts</text>
+<text x="32" y="539" class="s13">short conv + residual (MoE tail)</text>
+<rect x="396" y="527" width="74" height="16" rx="8" class="tag"/><text x="433" y="538.5" text-anchor="middle" class="mono s11">CONV_TAIL</text>
+<text x="240" y="572" text-anchor="middle" class="t2 s12">then the next layer visit</text>
+</svg>
+<figcaption><b>Figure 4.</b> One layer visit in loop passes 2 and 3, one token, read top to bottom. Blue rows read weights (the bytes); gray boxes are the small-op stretches between them. Tags name the kernel from this repo that now covers each item where its pattern matches; untagged items are separate kernels or patterns upstream already fuses. Layers outside the loop have no controllers, and layer 0 has no depth mix before attention.</figcaption>
+</figure>
+
+<h3>Why the profiler misled us</h3>
+<p>Our first plan followed the profile: fuse small ops to cut dispatches. The first fusion removed about 1,000 dispatches per token and gained 4%. The loop-controller fusion replaced eight ops per controller and gained 0.8%. Removing 199 <code>CONT</code> ops that ran concurrently with other work gained nothing. The profile had also shown one IQ2 expert kernel at 707 µs, which turned out to be the GPU clock ramping up inside the profiler.</p>
+<p>The method was the problem. In profile mode each fusion group gets its own serial encoder, so nothing overlaps, and every group pays an encoder switch and a clock ramp. Small ops look far more expensive than they are in the real graph, where they run next to other work. The profiler's commit message says as much; we learned it the slow way.</p>
+
+<h3>What did predict cost: barrier levels</h3>
+<p>A Metal compute encoder can run in concurrent mode: its dispatches may overlap unless a memory barrier separates them. ggml-metal uses that mode and inserts a barrier only when an op reads or writes memory that an op in the current concurrent group writes, or writes memory that group reads. The upstream encoder loop:</p>
+<pre><code>bool is_concurrent = ggml_metal_op_concurrency_check(ctx, node);
+...
+if (!is_concurrent) {
+    ggml_metal_op_concurrency_reset(ctx);  // memoryBarrierWithScope, clear the ranges
+}</code></pre>
+<p>So a graph runs as a sequence of <em>levels</em>: a group of independent dispatches, a barrier, the next group. At every barrier the GPU drains (the slowest kernel of the level finishes) and then the next level's kernels ramp up again (Figure 5).</p>
+<p>Two measurements pinned this down. The GPU was busy for about 35.0 of the 35.6 ms of a token, so CPU-side launch overhead was not the limit. And the time saved tracked the levels removed, at about 1.5 µs per level: a dispatch that joins an existing level costs almost nothing, an op that depends on the previous one adds a level. A bare dispatch plus barrier costs about 0.7 µs in a microbenchmark; in the real graph, removing a level saved about 1.5 µs, the difference being kernel ramp-up and tail. From then on our main metric was barrier levels per decode token.</p>
+
+<figure id="fig5">
+<svg class="d" viewBox="0 0 480 470" width="480" height="470" role="img" aria-labelledby="f5t f5d">
+<title id="f5t">Barrier levels: the mechanism and the measured counts</title>
+<desc id="f5d">Top: three independent chains of 8 dependent small ops run side by side but need 8 barrier levels; fused into one kernel per chain they need 1 level. Bottom: measured barrier levels per decode token. The wider reorder whitelist went from 3,257 to 2,656, the fused depth mix from 2,656 to 2,213, and REL_BIAS with CONV_TAIL and two graph changes from 2,131 to 1,783.</desc>
+<defs><marker id="m5" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="mkb"/></marker></defs>
+<rect x="0" y="3" width="22" height="10" rx="2" class="op"/>
+<text x="28" y="12" class="t2 s12">small-op kernel</text>
+<line x1="128" y1="1" x2="128" y2="15" class="bar"/>
+<text x="136" y="12" class="t2 s12">memory barrier</text>
+<text x="240" y="12" class="t2 s12">rows: chains that run side by side</text>
+<text x="0" y="42" class="b s13">Before: three independent chains, 8 dependent ops each</text>
+<rect x="10" y="54" width="30" height="14" rx="3" class="op"/><rect x="10" y="74" width="26" height="14" rx="3" class="op"/><rect x="10" y="94" width="34" height="14" rx="3" class="op"/>
+<rect x="63" y="54" width="24" height="14" rx="3" class="op"/><rect x="63" y="74" width="32" height="14" rx="3" class="op"/><rect x="63" y="94" width="28" height="14" rx="3" class="op"/>
+<rect x="116" y="54" width="34" height="14" rx="3" class="op"/><rect x="116" y="74" width="22" height="14" rx="3" class="op"/><rect x="116" y="94" width="26" height="14" rx="3" class="op"/>
+<rect x="169" y="54" width="26" height="14" rx="3" class="op"/><rect x="169" y="74" width="30" height="14" rx="3" class="op"/><rect x="169" y="94" width="32" height="14" rx="3" class="op"/>
+<rect x="222" y="54" width="30" height="14" rx="3" class="op"/><rect x="222" y="74" width="24" height="14" rx="3" class="op"/><rect x="222" y="94" width="28" height="14" rx="3" class="op"/>
+<rect x="275" y="54" width="22" height="14" rx="3" class="op"/><rect x="275" y="74" width="34" height="14" rx="3" class="op"/><rect x="275" y="94" width="26" height="14" rx="3" class="op"/>
+<rect x="328" y="54" width="32" height="14" rx="3" class="op"/><rect x="328" y="74" width="26" height="14" rx="3" class="op"/><rect x="328" y="94" width="30" height="14" rx="3" class="op"/>
+<rect x="381" y="54" width="28" height="14" rx="3" class="op"/><rect x="381" y="74" width="30" height="14" rx="3" class="op"/><rect x="381" y="94" width="24" height="14" rx="3" class="op"/>
+<line x1="52" y1="50" x2="52" y2="112" class="bar"/><line x1="105" y1="50" x2="105" y2="112" class="bar"/><line x1="158" y1="50" x2="158" y2="112" class="bar"/><line x1="211" y1="50" x2="211" y2="112" class="bar"/>
+<line x1="264" y1="50" x2="264" y2="112" class="bar"/><line x1="317" y1="50" x2="317" y2="112" class="bar"/><line x1="370" y1="50" x2="370" y2="112" class="bar"/><line x1="423" y1="50" x2="423" y2="112" class="bar"/>
+<text x="28" y="126" text-anchor="middle" class="tm s11">1</text><text x="81" y="126" text-anchor="middle" class="tm s11">2</text><text x="134" y="126" text-anchor="middle" class="tm s11">3</text><text x="187" y="126" text-anchor="middle" class="tm s11">4</text>
+<text x="240" y="126" text-anchor="middle" class="tm s11">5</text><text x="293" y="126" text-anchor="middle" class="tm s11">6</text><text x="346" y="126" text-anchor="middle" class="tm s11">7</text><text x="399" y="126" text-anchor="middle" class="tm s11">8</text>
+<path d="M4,132 V138 H423 V132" class="ln"/>
+<text x="213" y="154" text-anchor="middle" class="t2 s12">8 levels: each waits for its slowest kernel, then ramps up again</text>
+<text x="0" y="190" class="b s13">After: one fused kernel per chain</text>
+<rect x="10" y="202" width="46" height="14" rx="3" class="fb"/><rect x="10" y="222" width="42" height="14" rx="3" class="fb"/><rect x="10" y="242" width="48" height="14" rx="3" class="fb"/>
+<line x1="66" y1="198" x2="66" y2="260" class="bar"/>
+<rect x="74" y="200" width="349" height="58" rx="6" class="lmd"/>
+<text x="248" y="233" text-anchor="middle" class="t2 s12">7 fewer levels per chain</text>
+<path d="M4,268 V274 H66 V268" class="ln"/>
+<text x="35" y="290" text-anchor="middle" class="t2 s12">1 level</text>
+<line x1="0" y1="310" x2="480" y2="310" class="gr"/>
+<text x="0" y="336" class="b s13">Barrier levels per decode token, measured</text>
+<line x1="190" y1="346" x2="190" y2="446" class="gr"/><line x1="255" y1="346" x2="255" y2="446" class="gr"/><line x1="320" y1="346" x2="320" y2="446" class="gr"/><line x1="385" y1="346" x2="385" y2="446" class="gr"/><line x1="450" y1="346" x2="450" y2="446" class="gr"/>
+<text x="190" y="462" text-anchor="middle" class="tm s11">1,500</text><text x="255" y="462" text-anchor="middle" class="tm s11">2,000</text><text x="320" y="462" text-anchor="middle" class="tm s11">2,500</text><text x="385" y="462" text-anchor="middle" class="tm s11">3,000</text><text x="450" y="462" text-anchor="middle" class="tm s11">3,500</text>
+<text x="0" y="359" class="b s13">wider reorder</text><text x="0" y="374" class="t2 s12">27.6 → 28.4 tok/s</text>
+<text x="0" y="395" class="b s13">fused depth mix</text><text x="0" y="410" class="t2 s12">+2.1% decode (A/B)</text>
+<text x="0" y="431" class="b s13">REL_BIAS, CONV_TAIL</text><text x="0" y="446" class="t2 s12">28.0 → 28.4, in noise</text>
+<line x1="413.9" y1="362" x2="346.8" y2="362" class="lb" marker-end="url(#m5)"/>
+<circle cx="418.4" cy="362" r="4.5" class="dot0"><title>before: 3,257 levels</title></circle>
+<circle cx="340.3" cy="362" r="5" class="fb ring"><title>after: 2,656 levels</title></circle>
+<text x="418.4" y="350" text-anchor="middle" class="t2 s11">3,257</text><text x="340.3" y="350" text-anchor="middle" class="b s11">2,656</text>
+<line x1="335.8" y1="398" x2="290.5" y2="398" class="lb" marker-end="url(#m5)"/>
+<circle cx="340.3" cy="398" r="4.5" class="dot0"><title>before: 2,656 levels</title></circle>
+<circle cx="284" cy="398" r="5" class="fb ring"><title>after: 2,213 levels</title></circle>
+<text x="340.3" y="386" text-anchor="middle" class="t2 s11">2,656</text><text x="284" y="386" text-anchor="middle" class="b s11">2,213</text>
+<line x1="267.5" y1="434" x2="233.3" y2="434" class="lb" marker-end="url(#m5)"/>
+<circle cx="272" cy="434" r="4.5" class="dot0"><title>before: 2,131 levels</title></circle>
+<circle cx="226.8" cy="434" r="5" class="fb ring"><title>after: 1,783 levels</title></circle>
+<text x="272" y="422" text-anchor="middle" class="t2 s11">2,131</text><text x="226.8" y="422" text-anchor="middle" class="b s11">1,783</text>
+</svg>
+<figcaption><b>Figure 5.</b> Top: a schematic, not a trace. Dispatches in the same level overlap; each barrier costs a drain and a ramp-up, about 1.5 µs per level in the real graph. Bottom: measured levels per decode token around the three changes aimed at them (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/e3c63bc">e3c63bc</a>, <a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/7ff2d42">7ff2d42</a>, <a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/bbff17b">bbff17b</a>). The count was 2,131 at the start of the last day; our notes do not attribute the step from 2,213.</figcaption>
+<details class="data"><summary>Data table</summary>
+<table><thead><tr><th>change</th><th class="n">levels</th><th class="n">× 1.5 µs</th><th class="n">saved</th></tr></thead>
+<tbody><tr><td>wider reorder whitelist</td><td class="n">3,257 → 2,656</td><td class="n">0.90 ms</td><td class="n">1.02 ms</td></tr>
+<tr><td>fused depth mix</td><td class="n">2,656 → 2,213</td><td class="n">0.66 ms</td><td class="n">~0.72 ms</td></tr>
+<tr><td>REL_BIAS, CONV_TAIL, graph order, mask cast</td><td class="n">2,131 → 1,783</td><td class="n">0.52 ms</td><td class="n">0.50 ms</td></tr></tbody></table>
+<p class="note">The last two columns are derived: levels removed × 1.5 µs, and the change in ms per token from the measured decode speeds (27.6 → 28.4 tokens/s; +2.1% applied to 35.2 ms; 28.0 → 28.4 tokens/s).</p>
+</details>
+</figure>
+</section>
+
+<section id="nvfp4">
+<h2>4. NVFP4 kernels on the GPU</h2>
+<p>NVFP4 stores 64 weights in 36 bytes: four one-byte UE4M3 scales, one per 16 weights, and 32 bytes of 4-bit E2M1 codes (Figure 6). We added the four kernels the scheduler needs (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/54ce6c4">54ce6c4</a>): <code>mul_mv</code> (mat-vec), <code>mul_mv_id</code> (the MoE mat-vec, which picks expert matrices by id), and <code>mul_mm</code> and <code>mul_mm_id</code> (mat-mat, for prompt processing).</p>
+<p>The mat-vec does the decode work. A simdgroup is 32 GPU lanes that execute in lockstep. Each lane takes whole 32-weight halves of 64-weight blocks, for two rows at a time, with four simdgroups per threadgroup. A 2,304-wide row is 72 such halves per simdgroup, and the second row keeps more independent loads in flight.</p>
+<p>Decoding the codes needs no lookup table. Put an E2M1 code's three magnitude bits into an fp16 bit pattern at bit 9 and its sign at bit 15, and the result is exactly the fp4 value times 2<sup>−14</sup>: E2M1's exponent bias is 1 and fp16's is 15, and E2M1's one subnormal value (0.5) lands on an fp16 subnormal. Upstream's MXFP4 mat-vec already decodes this way; its comment notes that it is the same decode as MLX's. The scale byte works the same way: shifted left by 7, a UE4M3 byte is an fp16 number equal to the scale divided by 256. The kernel multiplies each row's sum by 2<sup>22</sup> once at the end.</p>
+
+<figure id="fig6">
+<svg class="d" viewBox="0 0 480 410" width="480" height="410" role="img" aria-labelledby="f6t f6d">
+<title id="f6t">NVFP4 block layout and the table-free E2M1 decode</title>
+<desc id="f6d">Top: a block is 4 UE4M3 scale bytes followed by 32 code bytes in 4 sub-blocks of 16 codes, one scale each. Byte i of a sub-block holds weight i in its low nibble and weight i plus 8 in its high nibble. Bottom: the E2M1 code 0101, which is 3.0, has its sign bit moved to fp16 bit 15, its two exponent bits to fp16 bits 11 and 10, and its mantissa bit to fp16 bit 9. The resulting fp16 value is 1.5 times 2 to the minus 13, which is 3.0 times 2 to the minus 14.</desc>
+<defs><marker id="m6" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker></defs>
+<text x="0" y="16" class="b s13">One NVFP4 block: 64 weights in 36 bytes</text>
+<text x="0" y="33" class="t2 s12">4.5 bits per weight; codes are E2M1: sign, 2 exponent bits, 1 mantissa bit</text>
+<rect x="12" y="44" width="18" height="26" class="cs"/><rect x="30" y="44" width="18" height="26" class="cs"/><rect x="48" y="44" width="18" height="26" class="cs"/><rect x="66" y="44" width="18" height="26" class="cs"/>
+<text x="21" y="61" text-anchor="middle" class="mono s10">s0</text><text x="39" y="61" text-anchor="middle" class="mono s10">s1</text><text x="57" y="61" text-anchor="middle" class="mono s10">s2</text><text x="75" y="61" text-anchor="middle" class="mono s10">s3</text>
+<rect x="92" y="44" width="92" height="26" class="cn"/><rect x="184" y="44" width="92" height="26" class="cn"/><rect x="276" y="44" width="92" height="26" class="cn"/><rect x="368" y="44" width="92" height="26" class="cn"/>
+<path d="M103.5,44 V70 M115,44 V70 M126.5,44 V70 M138,44 V70 M149.5,44 V70 M161,44 V70 M172.5,44 V70 M195.5,44 V70 M207,44 V70 M218.5,44 V70 M230,44 V70 M241.5,44 V70 M253,44 V70 M264.5,44 V70 M287.5,44 V70 M299,44 V70 M310.5,44 V70 M322,44 V70 M333.5,44 V70 M345,44 V70 M356.5,44 V70 M379.5,44 V70 M391,44 V70 M402.5,44 V70 M414,44 V70 M425.5,44 V70 M437,44 V70 M448.5,44 V70" class="sep"/>
+<text x="48" y="86" text-anchor="middle" class="t2 s11">4 scales</text>
+<text x="138" y="86" text-anchor="middle" class="t2 s11">16 codes × s0</text>
+<text x="230" y="86" text-anchor="middle" class="t2 s11">16 codes × s1</text>
+<text x="322" y="86" text-anchor="middle" class="t2 s11">16 codes × s2</text>
+<text x="414" y="86" text-anchor="middle" class="t2 s11">16 codes × s3</text>
+<line x1="92" y1="92" x2="64" y2="118" class="lm"/><line x1="184" y1="92" x2="416" y2="118" class="lm"/>
+<rect x="64" y="118" width="44" height="26" class="cn"/><rect x="108" y="118" width="44" height="26" class="cn"/><rect x="152" y="118" width="44" height="26" class="cn"/><rect x="196" y="118" width="44" height="26" class="cn"/>
+<rect x="240" y="118" width="44" height="26" class="cn"/><rect x="284" y="118" width="44" height="26" class="cn"/><rect x="328" y="118" width="44" height="26" class="cn"/><rect x="372" y="118" width="44" height="26" class="cn"/>
+<path d="M86,118 V144 M130,118 V144 M174,118 V144 M218,118 V144 M262,118 V144 M306,118 V144 M350,118 V144 M394,118 V144" class="sep"/>
+<text x="75" y="135" text-anchor="middle" class="mono s10">w8</text><text x="97" y="135" text-anchor="middle" class="mono s10">w0</text>
+<text x="119" y="135" text-anchor="middle" class="mono s10">w9</text><text x="141" y="135" text-anchor="middle" class="mono s10">w1</text>
+<text x="163" y="135" text-anchor="middle" class="mono s10">w10</text><text x="185" y="135" text-anchor="middle" class="mono s10">w2</text>
+<text x="207" y="135" text-anchor="middle" class="mono s10">w11</text><text x="229" y="135" text-anchor="middle" class="mono s10">w3</text>
+<text x="251" y="135" text-anchor="middle" class="mono s10">w12</text><text x="273" y="135" text-anchor="middle" class="mono s10">w4</text>
+<text x="295" y="135" text-anchor="middle" class="mono s10">w13</text><text x="317" y="135" text-anchor="middle" class="mono s10">w5</text>
+<text x="339" y="135" text-anchor="middle" class="mono s10">w14</text><text x="361" y="135" text-anchor="middle" class="mono s10">w6</text>
+<text x="383" y="135" text-anchor="middle" class="mono s10">w15</text><text x="405" y="135" text-anchor="middle" class="mono s10">w7</text>
+<text x="240" y="162" text-anchor="middle" class="t2 s11">the 8 bytes of a sub-block: high nibble = weight i + 8, low nibble = weight i</text>
+<text x="0" y="200" class="b s13">Decoding a code without a table</text>
+<text x="165" y="220" text-anchor="middle" class="t2 s12">s</text><text x="195" y="220" text-anchor="middle" class="t2 s12">e</text><text x="225" y="220" text-anchor="middle" class="t2 s12">e</text><text x="255" y="220" text-anchor="middle" class="t2 s12">m</text>
+<rect x="150" y="224" width="30" height="24" class="bx"/><rect x="180" y="224" width="30" height="24" class="bx"/><rect x="210" y="224" width="30" height="24" class="bx"/><rect x="240" y="224" width="30" height="24" class="bx"/>
+<text x="165" y="241" text-anchor="middle" class="mono">0</text><text x="195" y="241" text-anchor="middle" class="mono">1</text><text x="225" y="241" text-anchor="middle" class="mono">0</text><text x="255" y="241" text-anchor="middle" class="mono">1</text>
+<text x="142" y="241" text-anchor="end" class="t2 s12">3.0 in E2M1</text>
+<text x="280" y="241" class="t2 s12">mask and shift, no lookup</text>
+<line x1="165" y1="248" x2="60" y2="287" class="ln" marker-end="url(#m6)"/>
+<line x1="195" y1="248" x2="156" y2="287" class="ln" marker-end="url(#m6)"/>
+<line x1="225" y1="248" x2="180" y2="287" class="ln" marker-end="url(#m6)"/>
+<line x1="255" y1="248" x2="204" y2="287" class="ln" marker-end="url(#m6)"/>
+<rect x="48" y="288" width="24" height="24" class="bxb"/><rect x="72" y="288" width="24" height="24" class="bx"/><rect x="96" y="288" width="24" height="24" class="bx"/><rect x="120" y="288" width="24" height="24" class="bx"/>
+<rect x="144" y="288" width="24" height="24" class="bxb"/><rect x="168" y="288" width="24" height="24" class="bxb"/><rect x="192" y="288" width="24" height="24" class="bxb"/><rect x="216" y="288" width="24" height="24" class="bx"/>
+<rect x="240" y="288" width="24" height="24" class="bx"/><rect x="264" y="288" width="24" height="24" class="bx"/><rect x="288" y="288" width="24" height="24" class="bx"/><rect x="312" y="288" width="24" height="24" class="bx"/>
+<rect x="336" y="288" width="24" height="24" class="bx"/><rect x="360" y="288" width="24" height="24" class="bx"/><rect x="384" y="288" width="24" height="24" class="bx"/><rect x="408" y="288" width="24" height="24" class="bx"/>
+<text x="60" y="305" text-anchor="middle" class="mono s13">0</text><text x="84" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="108" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="132" y="305" text-anchor="middle" class="mono s13 tm">0</text>
+<text x="156" y="305" text-anchor="middle" class="mono s13">1</text><text x="180" y="305" text-anchor="middle" class="mono s13">0</text><text x="204" y="305" text-anchor="middle" class="mono s13">1</text><text x="228" y="305" text-anchor="middle" class="mono s13 tm">0</text>
+<text x="252" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="276" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="300" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="324" y="305" text-anchor="middle" class="mono s13 tm">0</text>
+<text x="348" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="372" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="396" y="305" text-anchor="middle" class="mono s13 tm">0</text><text x="420" y="305" text-anchor="middle" class="mono s13 tm">0</text>
+<text x="60" y="326" text-anchor="middle" class="tm s10">15</text><text x="84" y="326" text-anchor="middle" class="tm s10">14</text><text x="108" y="326" text-anchor="middle" class="tm s10">13</text><text x="132" y="326" text-anchor="middle" class="tm s10">12</text>
+<text x="156" y="326" text-anchor="middle" class="tm s10">11</text><text x="180" y="326" text-anchor="middle" class="tm s10">10</text><text x="204" y="326" text-anchor="middle" class="tm s10">9</text><text x="228" y="326" text-anchor="middle" class="tm s10">8</text>
+<text x="252" y="326" text-anchor="middle" class="tm s10">7</text><text x="276" y="326" text-anchor="middle" class="tm s10">6</text><text x="300" y="326" text-anchor="middle" class="tm s10">5</text><text x="324" y="326" text-anchor="middle" class="tm s10">4</text>
+<text x="348" y="326" text-anchor="middle" class="tm s10">3</text><text x="372" y="326" text-anchor="middle" class="tm s10">2</text><text x="396" y="326" text-anchor="middle" class="tm s10">1</text><text x="420" y="326" text-anchor="middle" class="tm s10">0</text>
+<path d="M50,332 V338 H70 V332" class="lm"/><path d="M74,332 V338 H190 V332" class="lm"/><path d="M194,332 V338 H430 V332" class="lm"/>
+<text x="60" y="352" text-anchor="middle" class="t2 s12">sign</text><text x="132" y="352" text-anchor="middle" class="t2 s12">exponent</text><text x="312" y="352" text-anchor="middle" class="t2 s12">mantissa</text>
+<text x="0" y="378" class="mono s12">fp16 0 00010 1000000000 = 1.5 × 2⁻¹³ = 3.0 × 2⁻¹⁴</text>
+<text x="0" y="398" class="t2 s12">every code comes out as its value × 2⁻¹⁴; the 2¹⁴ goes into the scale</text>
+</svg>
+<figcaption><b>Figure 6.</b> Top: the block layout, from <code>ggml-common.h</code> and the comment in <code>dequantize_nvfp4</code>. Bottom: the table-free decode, worked for the code 0101 (3.0). The highlighted fp16 bits are the only ones a code can set.</figcaption>
+</figure>
+
+<p>Results: <code>test-backend-ops</code> NVFP4 MUL_MAT passes 125/125. Prefill went from 42.8 to 251 tokens/s and decode from 15.9 to 24.2, with perplexity 4.412 against upstream's 4.423, KL divergence 0.0019, and the same top token 98.8% of the time.</p>
+<p>One piece came later (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/51bac5a">51bac5a</a>). The mat-mat path dequantizes tiles through <code>dequantize_nvfp4</code>, which still used a 16-entry table. At 512 tokens the NVFP4 MoE mat-mat ran at 5.7 TFLOPS against 6.9 for Q4_0, limited by dequantization. Switching it to the bit placement, four codes at a time:</p>
+<pre><code>// e2m1 nibbles placed at fp16 bit 9 (magnitude) and bit 15 (sign) are the fp4 values times 2^-14, exactly
+static inline float4 e2m1x4_to_f32(uint w, float d) {
+    const ushort4 n = ushort4(as_type&lt;uchar4&gt;(w));
+    return float4(as_type&lt;half4&gt;(ushort4(((n &amp; 7) &lt;&lt; 9) | ((n &amp; 8) &lt;&lt; 12))))*d;
+}</code></pre>
+<p>made the 512-token MoE matmuls faster (gate_up 7.58 → 5.96 ms, down 3.81 → 3.09 ms, 7.0–7.3 TFLOPS, now above Q4_0) and took prefill from 330 to 343 tokens/s, bit-identical.</p>
+
+<h3>A grouped MoE kernel for small batches</h3>
+<p>Speculative decoding verifies a few tokens at once. The standard MoE mat-vec handles each (token, expert slot) pair on its own, so if two tokens pick the same expert, its weights are read twice. The grouped kernel (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/7aca306">7aca306</a>), used for 2 to 8 tokens and at most 64 pairs, has each lane of a simdgroup load the expert ids of two pairs. A SIMD ballot then gives a 64-bit mask of the pairs that chose this threadgroup's expert; the lowest set bit is the owner. The owner decodes the weights once and computes every pair that uses them, and the other pairs exit (Figure 7).</p>
+
+<figure id="fig7">
+<svg class="d" viewBox="0 0 480 330" width="480" height="330" role="img" aria-labelledby="f7t f7d">
+<title id="f7t">The grouped NVFP4 MoE kernel reads each distinct expert once</title>
+<desc id="f7d">A batch of 3 tokens with 8 expert slots each, 24 pairs. Expert 41 is chosen by token 0 slot 2 and token 2 slot 5; expert 70 by token 1 slot 4 and token 2 slot 1. The first pair to choose an expert owns it: it decodes the weights once and computes both pairs; the later pair exits. A SIMD ballot over all pairs finds the owner as the lowest set bit. This batch needs 22 expert reads instead of 24.</desc>
+<text x="0" y="16" class="b s13">A verify batch: 3 tokens × 8 expert slots</text>
+<text x="0" y="33" class="t2 s12">expert ids are illustrative</text>
+<text x="50" y="52" text-anchor="end" class="tm s11">slot</text>
+<text x="81" y="52" text-anchor="middle" class="tm s11">0</text><text x="131" y="52" text-anchor="middle" class="tm s11">1</text><text x="181" y="52" text-anchor="middle" class="tm s11">2</text><text x="231" y="52" text-anchor="middle" class="tm s11">3</text>
+<text x="281" y="52" text-anchor="middle" class="tm s11">4</text><text x="331" y="52" text-anchor="middle" class="tm s11">5</text><text x="381" y="52" text-anchor="middle" class="tm s11">6</text><text x="431" y="52" text-anchor="middle" class="tm s11">7</text>
+<text x="50" y="77.5" text-anchor="end" class="t2 s12">token 0</text><text x="50" y="109.5" text-anchor="end" class="t2 s12">token 1</text><text x="50" y="141.5" text-anchor="end" class="t2 s12">token 2</text>
+<rect x="58" y="60" width="46" height="26" rx="4" class="bx"/><rect x="108" y="60" width="46" height="26" rx="4" class="bx"/><rect x="158" y="60" width="46" height="26" rx="4" class="bxb"/><rect x="208" y="60" width="46" height="26" rx="4" class="bx"/>
+<rect x="258" y="60" width="46" height="26" rx="4" class="bx"/><rect x="308" y="60" width="46" height="26" rx="4" class="bx"/><rect x="358" y="60" width="46" height="26" rx="4" class="bx"/><rect x="408" y="60" width="46" height="26" rx="4" class="bx"/>
+<text x="81" y="78" text-anchor="middle" class="mono s13">3</text><text x="131" y="78" text-anchor="middle" class="mono s13">17</text><text x="181" y="78" text-anchor="middle" class="mono s13 b">41</text><text x="231" y="78" text-anchor="middle" class="mono s13">58</text>
+<text x="281" y="78" text-anchor="middle" class="mono s13">64</text><text x="331" y="78" text-anchor="middle" class="mono s13">90</text><text x="381" y="78" text-anchor="middle" class="mono s13">101</text><text x="431" y="78" text-anchor="middle" class="mono s13">122</text>
+<rect x="58" y="92" width="46" height="26" rx="4" class="bx"/><rect x="108" y="92" width="46" height="26" rx="4" class="bx"/><rect x="158" y="92" width="46" height="26" rx="4" class="bx"/><rect x="208" y="92" width="46" height="26" rx="4" class="bx"/>
+<rect x="258" y="92" width="46" height="26" rx="4" class="bxb"/><rect x="308" y="92" width="46" height="26" rx="4" class="bx"/><rect x="358" y="92" width="46" height="26" rx="4" class="bx"/><rect x="408" y="92" width="46" height="26" rx="4" class="bx"/>
+<text x="81" y="110" text-anchor="middle" class="mono s13">7</text><text x="131" y="110" text-anchor="middle" class="mono s13">12</text><text x="181" y="110" text-anchor="middle" class="mono s13">33</text><text x="231" y="110" text-anchor="middle" class="mono s13">47</text>
+<text x="281" y="110" text-anchor="middle" class="mono s13 b">70</text><text x="331" y="110" text-anchor="middle" class="mono s13">85</text><text x="381" y="110" text-anchor="middle" class="mono s13">99</text><text x="431" y="110" text-anchor="middle" class="mono s13">118</text>
+<rect x="58" y="124" width="46" height="26" rx="4" class="bx"/><rect x="108" y="124" width="46" height="26" rx="4" class="bxd"/><rect x="158" y="124" width="46" height="26" rx="4" class="bx"/><rect x="208" y="124" width="46" height="26" rx="4" class="bx"/>
+<rect x="258" y="124" width="46" height="26" rx="4" class="bx"/><rect x="308" y="124" width="46" height="26" rx="4" class="bxd"/><rect x="358" y="124" width="46" height="26" rx="4" class="bx"/><rect x="408" y="124" width="46" height="26" rx="4" class="bx"/>
+<text x="81" y="142" text-anchor="middle" class="mono s13">9</text><text x="131" y="142" text-anchor="middle" class="mono s13 tm">70</text><text x="181" y="142" text-anchor="middle" class="mono s13">29</text><text x="231" y="142" text-anchor="middle" class="mono s13">52</text>
+<text x="281" y="142" text-anchor="middle" class="mono s13">66</text><text x="331" y="142" text-anchor="middle" class="mono s13 tm">41</text><text x="381" y="142" text-anchor="middle" class="mono s13">107</text><text x="431" y="142" text-anchor="middle" class="mono s13">125</text>
+<rect x="58" y="168" width="22" height="14" rx="3" class="bxb"/>
+<text x="88" y="180" class="s12">owner: reads and decodes that expert once, computes both pairs</text>
+<rect x="58" y="192" width="22" height="14" rx="3" class="bxd"/>
+<text x="88" y="204" class="s12">later pair that chose the same expert: exits</text>
+<text x="0" y="236" class="t2 s12">how a pair finds its owner: simd_ballot(id == 41) over all 24 pairs</text>
+<rect x="58" y="246" width="17" height="20" class="bx"/><rect x="75" y="246" width="17" height="20" class="bx"/><rect x="92" y="246" width="17" height="20" class="bxb"/><rect x="109" y="246" width="17" height="20" class="bx"/>
+<rect x="126" y="246" width="17" height="20" class="bx"/><rect x="143" y="246" width="17" height="20" class="bx"/><rect x="160" y="246" width="17" height="20" class="bx"/><rect x="177" y="246" width="17" height="20" class="bx"/>
+<rect x="194" y="246" width="17" height="20" class="bx"/><rect x="211" y="246" width="17" height="20" class="bx"/><rect x="228" y="246" width="17" height="20" class="bx"/><rect x="245" y="246" width="17" height="20" class="bx"/>
+<rect x="262" y="246" width="17" height="20" class="bx"/><rect x="279" y="246" width="17" height="20" class="bx"/><rect x="296" y="246" width="17" height="20" class="bx"/><rect x="313" y="246" width="17" height="20" class="bx"/>
+<rect x="330" y="246" width="17" height="20" class="bx"/><rect x="347" y="246" width="17" height="20" class="bx"/><rect x="364" y="246" width="17" height="20" class="bx"/><rect x="381" y="246" width="17" height="20" class="bx"/>
+<rect x="398" y="246" width="17" height="20" class="bx"/><rect x="415" y="246" width="17" height="20" class="bxb"/><rect x="432" y="246" width="17" height="20" class="bx"/><rect x="449" y="246" width="17" height="20" class="bx"/>
+<text x="66.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="83.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="100.5" y="260" text-anchor="middle" class="mono s11 b">1</text><text x="117.5" y="260" text-anchor="middle" class="mono s11 tm">0</text>
+<text x="134.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="151.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="168.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="185.5" y="260" text-anchor="middle" class="mono s11 tm">0</text>
+<text x="202.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="219.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="236.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="253.5" y="260" text-anchor="middle" class="mono s11 tm">0</text>
+<text x="270.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="287.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="304.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="321.5" y="260" text-anchor="middle" class="mono s11 tm">0</text>
+<text x="338.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="355.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="372.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="389.5" y="260" text-anchor="middle" class="mono s11 tm">0</text>
+<text x="406.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="423.5" y="260" text-anchor="middle" class="mono s11 b">1</text><text x="440.5" y="260" text-anchor="middle" class="mono s11 tm">0</text><text x="457.5" y="260" text-anchor="middle" class="mono s11 tm">0</text>
+<text x="66.5" y="280" text-anchor="middle" class="tm s10">p0</text><text x="100.5" y="280" text-anchor="middle" class="t2 s10 b">p2</text><text x="202.5" y="280" text-anchor="middle" class="tm s10">p8</text><text x="338.5" y="280" text-anchor="middle" class="tm s10">p16</text><text x="423.5" y="280" text-anchor="middle" class="t2 s10 b">p21</text>
+<text x="0" y="304" class="s12">the lowest set bit, p2, is the owner; p21 exits (p = token × 8 + slot)</text>
+<text x="0" y="322" class="t2 s12">this batch: 22 expert reads instead of 24</text>
+</svg>
+<figcaption><b>Figure 7.</b> How <code>kernel_mul_mv_id_nvfp4_grouped</code> deduplicates experts within a small batch. The ids are made up; in real verify batches tokens rarely shared experts.</figcaption>
+</figure>
+
+<p>It is correct, a small gain at 8 tokens and about neutral at 4. Tokens rarely share experts, so there is little to deduplicate. That fact comes back in the speculative decoding section.</p>
+</section>
+
+<section id="fusions">
+<h2>5. Fusing the stretches between weight reads</h2>
+<p>The idea came from <a href="https://github.com/Generated-Computers/Locals">Locals</a>, a local inference server that runs Inkling 2 Mini with its own kernels; its <a href="https://github.com/Generated-Computers/Locals/blob/main/docs/runtime/README.md">runtime notes</a> describe making each stretch between two weight reads one kernel. ggml-metal already has the machinery for that: a fusion table where each entry is an op sequence plus a check function, and an encoder that emits one kernel for a matched run of graph nodes. Our patterns change shape inside the chain (row reductions, permutes), so each check runs ggml's structural subgraph test itself: no intermediate result may be read outside the chain.</p>
+<p>Before fusing, we bounded the gain with switches that skip whole blocks (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/0b823b1">0b823b1</a>; the output is wrong, the timing is not): the short convolutions cost about 2.0 ms per token and the depth mix 1.3–2.0 ms.</p>
+
+<h3>L2_CLIP</h3>
+<p>The model clips each row of q, k and the relative-position queries r to an L2 norm of at most a threshold. In the model code (<code>inkling2.cpp</code>) that is a few lines:</p>
+<pre><code>if (scale) {
+    cur = ggml_mul(ctx0, cur, scale);
+}
+
+ggml_tensor * norm = ggml_sqrt(ctx0, ggml_sum_rows(ctx0, ggml_sqr(ctx0, cur)));
+norm = ggml_scale_bias(ctx0, norm, 1.0f, 1e-6f);
+
+ggml_tensor * factor = ggml_div(ctx0, ggml_fill(ctx0, norm, threshold), norm);
+
+return ggml_mul(ctx0, cur, ggml_clamp(ctx0, factor, 0.0f, 1.0f));</code></pre>
+<p>On the GPU that is nine dependent kernels, so nine barrier levels, three times per layer visit (Figure 8). <code>kernel_l2_clip_f32</code> (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/659aa87">659aa87</a>) does it with one simdgroup per row: about 1,000 fewer dispatches per token, decode 24.17 → 25.13 tokens/s, prefill 251 → 263, KL divergence against upstream 0.0018.</p>
+
+<figure id="fig8">
+<svg class="d" viewBox="0 0 480 440" width="480" height="440" role="img" aria-labelledby="f8t f8d">
+<title id="f8t">L2_CLIP: nine dependent kernels become one</title>
+<desc id="f8d">Before: MUL by the per-channel scale, SQR, SUM_ROWS, SQRT, SCALE adding 1e-6, FILL with the threshold, DIV, CLAMP to 0 to 1, and a final MUL, each depending on the previous one, so 9 barrier levels; the scaled input and the norm also feed later ops directly. After: one kernel, kernel_l2_clip_f32, computes f equal to clamp of t over the norm plus epsilon and y equal to x times f, with one simdgroup per row. There are 3 clips per layer visit, 144 per token, about 1,000 fewer dispatches.</desc>
+<defs><marker id="m8" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker></defs>
+<text x="0" y="16" class="b s13">Before: 9 kernels, 9 levels</text>
+<text x="262" y="16" class="b s13">After: 1 kernel, 1 level</text>
+<text x="105" y="40" text-anchor="middle" class="s12">x: a row of q, k or r</text>
+<line x1="105" y1="45" x2="105" y2="56" class="ln" marker-end="url(#m8)"/>
+<rect x="60" y="56" width="90" height="24" rx="4" class="bx"/><text x="105" y="72" text-anchor="middle" class="mono s12">MUL</text><text x="160" y="72" class="t2 s12">× s, per channel</text>
+<rect x="60" y="92" width="90" height="24" rx="4" class="bx"/><text x="105" y="108" text-anchor="middle" class="mono s12">SQR</text><text x="160" y="108" class="t2 s12">x'²</text>
+<rect x="60" y="128" width="90" height="24" rx="4" class="bx"/><text x="105" y="144" text-anchor="middle" class="mono s12">SUM_ROWS</text><text x="160" y="144" class="t2 s12">sum over the row</text>
+<rect x="60" y="164" width="90" height="24" rx="4" class="bx"/><text x="105" y="180" text-anchor="middle" class="mono s12">SQRT</text><text x="160" y="180" class="t2 s12">‖x'‖</text>
+<rect x="60" y="200" width="90" height="24" rx="4" class="bx"/><text x="105" y="216" text-anchor="middle" class="mono s12">SCALE</text><text x="160" y="216" class="t2 s12">+ 1e-6</text>
+<rect x="60" y="236" width="90" height="24" rx="4" class="bx"/><text x="105" y="252" text-anchor="middle" class="mono s12">FILL</text><text x="160" y="252" class="t2 s12">fill with t</text>
+<rect x="60" y="272" width="90" height="24" rx="4" class="bx"/><text x="105" y="288" text-anchor="middle" class="mono s12">DIV</text><text x="160" y="288" class="t2 s12">t / ‖x'‖</text>
+<rect x="60" y="308" width="90" height="24" rx="4" class="bx"/><text x="105" y="324" text-anchor="middle" class="mono s12">CLAMP</text><text x="160" y="324" class="t2 s12">to [0, 1]</text>
+<rect x="60" y="344" width="90" height="24" rx="4" class="bx"/><text x="105" y="360" text-anchor="middle" class="mono s12">MUL</text><text x="160" y="360" class="t2 s12">x' × factor</text>
+<path d="M105,80 V92 M105,116 V128 M105,152 V164 M105,188 V200 M105,224 V236 M105,260 V272 M105,296 V308 M105,332 V344" class="ln"/>
+<path d="M91,86 H119 M91,122 H119 M91,158 H119 M91,194 H119 M91,230 H119 M91,266 H119 M91,302 H119 M91,338 H119" class="bar"/>
+<path d="M60,68 H38 V356 H59" class="ln" marker-end="url(#m8)"/>
+<text x="32" y="214" text-anchor="end" class="t2 s12">x'</text>
+<path d="M60,212 H48 V284 H59" class="ln" marker-end="url(#m8)"/>
+<line x1="105" y1="368" x2="105" y2="382" class="ln" marker-end="url(#m8)"/>
+<text x="105" y="398" text-anchor="middle" class="s13">y</text>
+<text x="368" y="112" text-anchor="middle" class="s12">x, s, t</text>
+<line x1="368" y1="118" x2="368" y2="149" class="ln" marker-end="url(#m8)"/>
+<rect x="262" y="150" width="212" height="108" rx="8" class="fz"/>
+<text x="368" y="176" text-anchor="middle" class="mono s12 b">kernel_l2_clip_f32</text>
+<text x="368" y="202" text-anchor="middle" class="s13">f = clamp(t / (‖x'‖ + ε), 0, 1)</text>
+<text x="368" y="222" text-anchor="middle" class="s13">y = x' × f</text>
+<text x="368" y="244" text-anchor="middle" class="t2 s12">one simdgroup per row</text>
+<line x1="368" y1="258" x2="368" y2="288" class="ln" marker-end="url(#m8)"/>
+<text x="368" y="304" text-anchor="middle" class="s13">y</text>
+<text x="262" y="340" class="t2 s12">3 clips per layer visit (q, k, r)</text>
+<text x="262" y="358" class="t2 s12">× 48 visits = 144 per token</text>
+<text x="262" y="376" class="t2 s12">about 1,000 fewer dispatches</text>
+<text x="262" y="402" class="b s12">decode 24.17 → 25.13 tok/s</text>
+<text x="262" y="420" class="s12">prefill 251 → 263 tok/s</text>
+</svg>
+<figcaption><b>Figure 8.</b> The L2_CLIP pattern from <code>ggml-metal-fusion.cpp</code>. Each orange tick is a barrier between dependent kernels; the side paths are the scaled input x' and the norm, read again further down. Clips without a per-channel scale (k) match the same pattern minus the first MUL.</figcaption>
+</figure>
+
+<h3>SITU</h3>
+<p>The MoE activation is a softcapped gate, b·tanh(g/b)·sigmoid(g) · lb·tanh(u/lb): nine ops between the gate_up and down expert reads. One kernel (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/48bd597">48bd597</a>): decode 25.56, prefill 280, KL divergence 0.0017.</p>
+
+<h3>LOOP_CTRL</h3>
+<p>In passes 2 and 3 each controller computes cur − tanh(W<sub>f</sub>x)·cur + tanh(W<sub>g</sub>x)·msg: two small mat-vecs and six elementwise ops, now one kernel with a simdgroup per output channel, for up to 8 tokens (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/f32b088">f32b088</a>). It gained only 0.8%. Outputs were identical on three of four prompts; the fourth diverged at a near-tie. This was the result that made us doubt that dispatch count was the cost.</p>
+
+<h3>F16 router and controller weights</h3>
+<p>Not a fusion. The router (a 2,304 × 128 matrix per layer) and the controller weights ship as F32, about 283 MB read per token. We added <code>LLAMA_QUANT_ONLY_MATCHED</code> (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/c653231">c653231</a>), which makes llama-quantize change only the tensors that a <code>--tensor-type</code> pattern matches, and converted those 168 tensors to F16 with this pattern file (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/f91b658">f91b658</a>):</p>
+<pre><code>ffn_gate_inp\.weight=f16
+loop_.*_ctrl_.*\.weight=f16</code></pre>
+<p>Decode +3.4%, KL divergence unchanged. That file is the one we used from then on.</p>
+
+<h3>Identity ops</h3>
+<p>For a single token, the depth-mix query repeat and the expert-scale repeat were plain copies, and the zero attention sinks were rebuilt in every layer. Skipping the repeats and sharing one zero-sinks tensor per graph (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/4457fc3">4457fc3</a>) left decode about unchanged and added 3% to prefill.</p>
+
+<h3>CONV_RES</h3>
+<p>The short convolutions end in <code>SSM_CONV</code>, <code>ADD</code>, <code>SCALE</code>. The convolution output reaches the <code>ADD</code> through a <code>RESHAPE</code> view, so this matcher checks the raw node span, views included (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/fa85426">fa85426</a>). The conv state copy is emitted earlier by the graph builder and stays outside the pattern. Decode +2.2% (26.4 → 27.0), identical outputs.</p>
+</section>
+
+<section id="reorder">
+<h2>6. Letting the reorder see further</h2>
+<p>Before encoding, ggml-metal reorders the graph to fill each concurrent group. When a node conflicts with the current group, it looks up to 64 nodes ahead for independent nodes that can join first. The look-ahead stops at the first op that is not on a whitelist, and Inkling's graph is full of ops that were not on it. The whole change (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/e3c63bc">e3c63bc</a>):</p>
+<pre><code>case GGML_OP_CONCAT:
+case GGML_OP_SOFT_MAX:
+case GGML_OP_FILL:
+case GGML_OP_PAD:
+case GGML_OP_SQR:
+case GGML_OP_SQRT:
+case GGML_OP_LOG:
+case GGML_OP_FLASH_ATTN_EXT:
+    return true;</code></pre>
+<p>Barrier levels per token went from 3,257 to 2,656 and decode from 27.6 to 28.4 tokens/s, with bit-identical logits.</p>
+</section>
+
+<section id="mix">
+<h2>7. The depth mix</h2>
+<p>The depth mix replaces the residual add. It RMS-normalizes the earlier block outputs and the current state, scores them against a learned query, and returns the softmax-weighted sum. A decode token runs 120 of them: one before attention in every visit except layer 0's (47), one before the MoE in every visit (48), one per visit in passes 2 and 3 to build the messages (24), and one before the output head.</p>
+<p>Many mixes in a graph read the same list of earlier blocks, so the first change caches the normalized stack and its transpose per distinct block list (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/151e465">151e465</a>); each mix then normalizes only the current state. On its own that saved about 180 dispatches and no measurable time, but it reduced every mix to the same short sequence: an RMS norm, two concats with the cached stack, the score matmul, a softmax, and the weighted sum.</p>
+<p><code>kernel_mix_f32</code> runs that sequence in one 1,024-thread threadgroup per query (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/7ff2d42">7ff2d42</a>). Barrier levels went from 2,656 to 2,213 and decode gained 2.1% in a same-window A/B, with mean KL divergence against the unfused build of at most 8e-5 and no top-1 change in 384 tokens.</p>
+<p>Prefill had its own version of the problem: the skip switch put the mix at about 16% of prompt-processing time. Using the cached prefix at any batch size (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/be29e28">be29e28</a>, +8.4%) and running the fused kernel over a (query, token) grid with 256 threads per threadgroup (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/35c0667">35c0667</a>, +5.8%) took pp512 from 288 to 330 tokens/s. KL divergence against upstream moved from 0.00171 to 0.00180, about one standard error; perplexity 4.414, top-1 agreement 98.6%.</p>
+</section>
+
+<section id="nov22">
+<h2>8. The last stretches</h2>
+<p>By the last day, the remaining levels sat in two places: the tail of each layer (a convolution, its state store and the residual adds) and the relative-position bias.</p>
+<p>Two graph changes came first. The builder emitted nodes in an order that interleaved those patterns with unrelated work, so we emit the sink projection before the bias ops and each layer's output right after its conv state store (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/85c9b12">85c9b12</a>, node order only). And <code>build_attn</code> cast the attention mask to F32 in every layer, 48 times per token; now the cast happens once per graph (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/ad73b19">ad73b19</a>).</p>
+<p><strong>CONV_TAIL</strong> (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/b1f549c">b1f549c</a>) fuses the concat with the conv history, the conv state copy, <code>SSM_CONV</code>, the residual <code>ADD</code>, <code>SCALE</code> and the optional second residual <code>ADD</code> into one kernel, at both the attention-output and the MoE tails, for one token. <strong>REL_BIAS</strong> (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/bbff17b">bbff17b</a>) fuses the bias-table matmul, the sink subtraction, the permute and gather by distance, the mask add and the F16 cast, and writes the result straight into the flash-attention mask (Figure 9).</p>
+
+<figure id="fig9">
+<svg class="d" viewBox="0 0 480 386" width="480" height="386" role="img" aria-labelledby="f9t f9d">
+<title id="f9t">REL_BIAS: the relative-position bias chain becomes one kernel</title>
+<desc id="f9d">Before: after padding the bias table, MUL_MAT projects r on the table, SUB subtracts the sinks, CONT permutes, GET_ROWS gathers by position, CONT permutes again, ADD adds the mask, which was cast to F32 in every layer, 48 times per token, and CPY converts to F16 for flash attention: 7 dependent kernels. After: kernel_rel_bias_f32 reads r, the table, the sinks, the positions and the mask and writes the F16 mask directly, 1 level; the mask is cast once per graph.</desc>
+<defs><marker id="m9" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker></defs>
+<text x="0" y="16" class="b s13">Before: 7 kernels in a chain</text>
+<text x="262" y="16" class="b s13">After: 1 kernel</text>
+<rect x="8" y="30" width="104" height="22" rx="4" class="bx"/><text x="60" y="45" text-anchor="middle" class="mono s11">PAD(table)</text>
+<line x1="60" y1="52" x2="60" y2="71" class="ln" marker-end="url(#m9)"/>
+<rect x="8" y="72" width="104" height="22" rx="4" class="bx"/><text x="60" y="87.5" text-anchor="middle" class="mono s12">MUL_MAT</text><text x="120" y="87.5" class="t2 s12">← r (r · table)</text>
+<rect x="8" y="106" width="104" height="22" rx="4" class="bx"/><text x="60" y="121.5" text-anchor="middle" class="mono s12">SUB</text><text x="120" y="121.5" class="t2 s12">← sinks</text>
+<rect x="8" y="140" width="104" height="22" rx="4" class="bx"/><text x="60" y="155.5" text-anchor="middle" class="mono s12">CONT</text><text x="120" y="155.5" class="t2 s12">permute</text>
+<rect x="8" y="174" width="104" height="22" rx="4" class="bx"/><text x="60" y="189.5" text-anchor="middle" class="mono s12">GET_ROWS</text><text x="120" y="189.5" class="t2 s12">← positions</text>
+<rect x="8" y="208" width="104" height="22" rx="4" class="bx"/><text x="60" y="223.5" text-anchor="middle" class="mono s12">CONT</text><text x="120" y="223.5" class="t2 s12">permute</text>
+<rect x="8" y="242" width="104" height="22" rx="4" class="bx"/><text x="60" y="257.5" text-anchor="middle" class="mono s12">ADD</text>
+<rect x="8" y="276" width="104" height="22" rx="4" class="bx"/><text x="60" y="291.5" text-anchor="middle" class="mono s12">CPY</text><text x="120" y="291.5" class="t2 s12">to F16</text>
+<path d="M60,94 V106 M60,128 V140 M60,162 V174 M60,196 V208 M60,230 V242 M60,264 V276" class="ln"/>
+<path d="M46,100 H74 M46,134 H74 M46,168 H74 M46,202 H74 M46,236 H74 M46,270 H74" class="bar"/>
+<rect x="172" y="242" width="76" height="22" rx="4" class="bxo"/><text x="210" y="257.5" text-anchor="middle" class="mono s12">CAST</text>
+<line x1="172" y1="253" x2="113" y2="253" class="ln" marker-end="url(#m9)"/>
+<text x="142" y="248" text-anchor="middle" class="t2 s11">mask</text>
+<text x="210" y="280" text-anchor="middle" class="t2 s11">48× per token</text>
+<line x1="60" y1="298" x2="60" y2="319" class="ln" marker-end="url(#m9)"/>
+<rect x="8" y="320" width="104" height="22" rx="4" class="bx"/><text x="60" y="335" text-anchor="middle" class="mono s11">FLASH_ATTN</text>
+<text x="8" y="372" class="t2 s12">7 levels per visit, plus a cast</text>
+<rect x="262" y="30" width="104" height="22" rx="4" class="bx"/><text x="314" y="45" text-anchor="middle" class="mono s11">PAD(table)</text>
+<rect x="374" y="30" width="100" height="22" rx="4" class="bx"/><text x="424" y="45" text-anchor="middle" class="mono s11">CAST mask</text>
+<text x="424" y="66" text-anchor="middle" class="t2 s11">once per graph</text>
+<text x="262" y="116" class="s12">r</text><text x="262" y="136" class="s12">table</text><text x="262" y="156" class="s12">sinks</text><text x="262" y="176" class="s12">positions</text><text x="262" y="196" class="s12">mask</text>
+<line x1="318" y1="112" x2="331" y2="112" class="ln" marker-end="url(#m9)"/><line x1="318" y1="132" x2="331" y2="132" class="ln" marker-end="url(#m9)"/><line x1="318" y1="152" x2="331" y2="152" class="ln" marker-end="url(#m9)"/><line x1="318" y1="172" x2="331" y2="172" class="ln" marker-end="url(#m9)"/><line x1="318" y1="192" x2="331" y2="192" class="ln" marker-end="url(#m9)"/>
+<rect x="332" y="96" width="146" height="110" rx="8" class="fz"/>
+<text x="405" y="120" text-anchor="middle" class="mono s11 b">kernel_rel_bias_f32</text>
+<text x="405" y="146" text-anchor="middle" class="s13">r · table[pos]</text>
+<text x="405" y="164" text-anchor="middle" class="s13">− sink + mask</text>
+<text x="405" y="190" text-anchor="middle" class="t2 s12">written as F16</text>
+<line x1="405" y1="206" x2="405" y2="319" class="ln" marker-end="url(#m9)"/>
+<rect x="332" y="320" width="146" height="22" rx="4" class="bx"/><text x="405" y="335" text-anchor="middle" class="mono s11">FLASH_ATTN</text>
+<text x="262" y="372" class="t2 s12">1 level; the cast runs once</text>
+</svg>
+<figcaption><b>Figure 9.</b> The REL_BIAS chain per layer visit, before and after (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/bbff17b">bbff17b</a>, <a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/ad73b19">ad73b19</a>). Padding the bias table and the sink projection stay separate ops; the sink projection is now emitted early so the seven fused ops sit next to each other in the graph.</figcaption>
+</figure>
+
+<p>Together with the two graph changes: barrier levels 2,131 → 1,783 per token, decode 28.0 → 28.4 in an interleaved A/B (within noise), prefill 343 → 362. <code>dcheck</code> on three prompts showed no top-1 divergence over 128 tokens and mean KL divergence of at most 2.7e-4, the same as with the fusions off. We did not rerun perplexity for these two.</p>
+
+<h3>The gotcha: garbage from the first token</h3>
+<p>Fusing deletes intermediate tensors, and the graph allocator does not know that. It plans memory from the unfused graph, so if a fused kernel reads an input whose last use, as far as the allocator can tell, was an early node of the pattern, that memory can be handed to another tensor before the fused kernel runs. ggml handles this with <em>alloc deps</em>: the backend lists tensors to keep alive until a pattern's last node, and the scheduler inserts <code>VIEW</code> nodes after that node to hold them.</p>
+<p>Upstream registered deps only for the longest pattern that matched at a node, but which pattern actually fuses is decided later, at encode time. We changed that to register the deps of every match, nested ones included, since extra deps only extend lifetimes (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/f59b466">f59b466</a>). Then CONV_TAIL arrived and its deps broke the allocation of the patterns nested inside it (MOE_REDUCE and CONV_RES): the model produced garbage from the first token.</p>
+<p>The fix was to show that CONV_TAIL needs no deps at all. Each thread reads its own channel of every input and then writes that channel of the output, so even if the allocator places the output on top of an input, no thread can read a value another thread has already overwritten:</p>
+<pre><code>// conv_tail needs none: every graph input is read per channel by the thread that writes that channel, so an
+// output placed over an input cannot race (its deps also broke the allocation of the nested patterns)
+if (fusion-&gt;id == GGML_METAL_FUSION_CONV_TAIL) {
+    return;
+}</code></pre>
+<p>REL_BIAS keeps deps, but only on intermediates computed by the graph; weights, inputs and caches are never reused by the allocator. A 15-op variant that also folded the MoE expert sum into CONV_TAIL was dropped: it is longer than the 16-node limit for one fused run, and it is not alias-safe.</p>
+</section>
+
+<section id="progress">
+<h2>9. Progress, change by change</h2>
+<p>Figure 10 puts the measurements side by side. Prefill numbers chain cleanly from one change to the next. Decode numbers come from different measurement windows, so each change is shown as its own measured gain against the build just before it.</p>
+
+<figure id="fig10">
+<svg class="d" viewBox="0 0 480 600" width="480" height="600" role="img" aria-labelledby="f10t f10d">
+<title id="f10t">Prefill after each change, and the decode gain of each change</title>
+<desc id="f10d">Prefill pp512 in tokens per second: upstream with experts on the CPU 42.8, native NVFP4 kernels 251, L2_CLIP 263, SITU 280, identity ops and decode work 288, batched depth mix 330, table-free NVFP4 dequant 343, REL_BIAS and CONV_TAIL 362; MLX 4-bit 411 to 421. Decode gain of each change against the build before it: L2_CLIP 4.0 percent, SITU 1.7, LOOP_CTRL 0.8, F16 router and loop weights 3.4, identity ops about 0, CONV_RES 2.2, depth-mix cache not measurable, wider reorder 2.9, fused depth mix 2.1, REL_BIAS and CONV_TAIL 1.4, within noise.</desc>
+<text x="0" y="16" class="b s15">Prefill, pp512</text><text x="112" y="16" class="t2 s13">tokens/s after each change</text>
+<text x="194" y="43.5" text-anchor="end" class="s13">upstream, experts on CPU</text>
+<text x="194" y="69.5" text-anchor="end" class="s13">native NVFP4 kernels</text>
+<text x="194" y="95.5" text-anchor="end" class="s13">L2_CLIP</text>
+<text x="194" y="121.5" text-anchor="end" class="s13">SITU</text>
+<text x="194" y="147.5" text-anchor="end" class="s13">identity ops, decode work</text>
+<text x="194" y="173.5" text-anchor="end" class="s13">batched depth mix</text>
+<text x="194" y="199.5" text-anchor="end" class="s13">table-free NVFP4 dequant</text>
+<text x="194" y="225.5" text-anchor="end" class="s13 b">REL_BIAS, CONV_TAIL</text>
+<text x="194" y="251.5" text-anchor="end" class="s13 t2">MLX 4-bit, other quant</text>
+<path d="M200,32 H218.3 A4,4 0 0 1 222.3,36 V42 A4,4 0 0 1 218.3,46 H200 Z" class="fg"><title>upstream, experts on CPU: 42.8 tok/s</title></path>
+<path d="M200,58 H326.5 A4,4 0 0 1 330.5,62 V68 A4,4 0 0 1 326.5,72 H200 Z" class="fb"><title>native NVFP4 kernels: 251 tok/s</title></path>
+<path d="M200,84 H332.8 A4,4 0 0 1 336.8,88 V94 A4,4 0 0 1 332.8,98 H200 Z" class="fb"><title>L2_CLIP: 263 tok/s</title></path>
+<path d="M200,110 H341.6 A4,4 0 0 1 345.6,114 V120 A4,4 0 0 1 341.6,124 H200 Z" class="fb"><title>SITU: 280 tok/s</title></path>
+<path d="M200,136 H345.8 A4,4 0 0 1 349.8,140 V146 A4,4 0 0 1 345.8,150 H200 Z" class="fb"><title>identity ops, decode work: 288 tok/s</title></path>
+<path d="M200,162 H367.6 A4,4 0 0 1 371.6,166 V172 A4,4 0 0 1 367.6,176 H200 Z" class="fb"><title>batched depth mix: 330 tok/s</title></path>
+<path d="M200,188 H374.4 A4,4 0 0 1 378.4,192 V198 A4,4 0 0 1 374.4,202 H200 Z" class="fb"><title>table-free NVFP4 dequant: 343 tok/s</title></path>
+<path d="M200,214 H384.2 A4,4 0 0 1 388.2,218 V224 A4,4 0 0 1 384.2,228 H200 Z" class="fb"><title>REL_BIAS, CONV_TAIL: 362 tok/s</title></path>
+<path d="M200,240 H414.9 A4,4 0 0 1 418.9,244 V250 A4,4 0 0 1 414.9,254 H200 Z" class="fg op45"><title>MLX 4-bit: 411 to 421 tok/s</title></path>
+<rect x="200" y="240" width="213.7" height="14" class="fg"><title>MLX 4-bit: 411 to 421 tok/s</title></rect>
+<text x="227.3" y="43.5" class="s12">42.8</text>
+<text x="335.5" y="69.5" class="s12">251</text>
+<text x="341.8" y="95.5" class="s12">263</text>
+<text x="350.6" y="121.5" class="s12">280</text>
+<text x="354.8" y="147.5" class="s12">288</text>
+<text x="376.6" y="173.5" class="s12">330</text>
+<text x="383.4" y="199.5" class="s12">343</text>
+<text x="393.2" y="225.5" class="s12 b">362</text>
+<text x="423.9" y="251.5" class="s12 t2">411–421</text>
+<line x1="200" y1="28" x2="200" y2="258" class="ax"/>
+<text x="0" y="300" class="b s15">Decode: gain from each change</text>
+<text x="0" y="318" class="t2 s12">against the build just before it; the NVFP4 kernels (+52%) are not shown</text>
+<rect x="200" y="328" width="104" height="242" class="nz"/>
+<text x="206" y="339" class="t2 s11">within noise</text>
+<text x="194" y="354.5" text-anchor="end" class="s13">L2_CLIP</text>
+<text x="194" y="377.5" text-anchor="end" class="s13">SITU</text>
+<text x="194" y="400.5" text-anchor="end" class="s13">LOOP_CTRL</text>
+<text x="194" y="423.5" text-anchor="end" class="s13">F16 router, loop weights</text>
+<text x="194" y="446.5" text-anchor="end" class="s13">identity ops</text>
+<text x="194" y="469.5" text-anchor="end" class="s13">CONV_RES</text>
+<text x="194" y="492.5" text-anchor="end" class="s13">depth-mix cache</text>
+<text x="194" y="515.5" text-anchor="end" class="s13">wider reorder</text>
+<text x="194" y="538.5" text-anchor="end" class="s13">fused depth mix</text>
+<text x="194" y="561.5" text-anchor="end" class="s13">REL_BIAS, CONV_TAIL</text>
+<path d="M200,344 H404 A4,4 0 0 1 408,348 V353 A4,4 0 0 1 404,357 H200 Z" class="fb"><title>L2_CLIP: +4.0% (24.17 to 25.13 tok/s)</title></path>
+<path d="M200,367 H284.4 A4,4 0 0 1 288.4,371 V376 A4,4 0 0 1 284.4,380 H200 Z" class="fb"><title>SITU: +1.7% (25.13 to 25.56 tok/s)</title></path>
+<path d="M200,390 H237.6 A4,4 0 0 1 241.6,394 V399 A4,4 0 0 1 237.6,403 H200 Z" class="fb"><title>LOOP_CTRL: +0.8%</title></path>
+<path d="M200,413 H372.8 A4,4 0 0 1 376.8,417 V422 A4,4 0 0 1 372.8,426 H200 Z" class="fb"><title>F16 router and loop weights: +3.4%</title></path>
+<circle cx="200" cy="442.5" r="3.5" class="fm"><title>identity ops: decode about unchanged</title></circle>
+<path d="M200,459 H310.4 A4,4 0 0 1 314.4,463 V468 A4,4 0 0 1 310.4,472 H200 Z" class="fb"><title>CONV_RES: +2.2% (26.4 to 27.0 tok/s)</title></path>
+<circle cx="200" cy="488.5" r="3.5" class="fm"><title>depth-mix cache: no measurable gain</title></circle>
+<path d="M200,505 H346.8 A4,4 0 0 1 350.8,509 V514 A4,4 0 0 1 346.8,518 H200 Z" class="fb"><title>wider reorder: +2.9% (27.6 to 28.4 tok/s)</title></path>
+<path d="M200,528 H305.2 A4,4 0 0 1 309.2,532 V537 A4,4 0 0 1 305.2,541 H200 Z" class="fb"><title>fused depth mix: +2.1%, same-window A/B</title></path>
+<path d="M200,551 H268.8 A4,4 0 0 1 272.8,555 V560 A4,4 0 0 1 268.8,564 H200 Z" class="fb"><title>REL_BIAS, CONV_TAIL: +1.4% (28.0 to 28.4 tok/s), within noise</title></path>
+<text x="413" y="354.5" class="s12">+4.0%</text>
+<text x="293.4" y="377.5" class="s12">+1.7%</text>
+<text x="246.6" y="400.5" class="s12">+0.8%</text>
+<text x="381.8" y="423.5" class="s12">+3.4%</text>
+<text x="208" y="446.5" class="s12 t2">~0</text>
+<text x="319.4" y="469.5" class="s12">+2.2%</text>
+<text x="208" y="492.5" class="s12 t2">not measurable</text>
+<text x="355.8" y="515.5" class="s12">+2.9%</text>
+<text x="314.2" y="538.5" class="s12">+2.1% (A/B)</text>
+<text x="277.8" y="561.5" class="s12">+1.4%</text>
+<line x1="200" y1="328" x2="200" y2="570" class="ax"/>
+<path d="M200,570 V575 M252,570 V575 M304,570 V575 M356,570 V575 M408,570 V575 M460,570 V575" class="ax"/>
+<text x="200" y="588" text-anchor="middle" class="tm s11">0</text><text x="252" y="588" text-anchor="middle" class="tm s11">1</text><text x="304" y="588" text-anchor="middle" class="tm s11">2</text><text x="356" y="588" text-anchor="middle" class="tm s11">3</text><text x="408" y="588" text-anchor="middle" class="tm s11">4</text><text x="460" y="588" text-anchor="middle" class="tm s11">5%</text>
+</svg>
+<figcaption><b>Figure 10.</b> Top: pp512 after each change; the 288 was measured before the batched-mix work and includes the identity-op change (+3%). Bottom: each change's decode gain as its commit measured it. The gray band is the run-to-run noise, ±0.6 tokens/s, about ±2% at these speeds. Multiplying the gains predicts about 29.0 tokens/s; the final llama-bench run measured 28.4, a gap the size of that noise. The batched mix and the table-free dequant only affect prefill.</figcaption>
+<details class="data"><summary>Data table</summary>
+<table><thead><tr><th>change</th><th>commit</th><th class="n">pp512</th><th class="n">decode</th></tr></thead>
+<tbody>
+<tr><td>upstream, experts on CPU</td><td>9213dfe + #32704</td><td class="n">42.8</td><td class="n">15.9</td></tr>
+<tr><td>native NVFP4 kernels</td><td>54ce6c4</td><td class="n">251</td><td class="n">24.2</td></tr>
+<tr><td>L2_CLIP</td><td>659aa87</td><td class="n">263</td><td class="n">24.17 → 25.13</td></tr>
+<tr><td>SITU</td><td>48bd597</td><td class="n">280</td><td class="n">25.56</td></tr>
+<tr><td>LOOP_CTRL</td><td>f32b088</td><td class="n">–</td><td class="n">+0.8%</td></tr>
+<tr><td>F16 router and loop weights</td><td>f91b658</td><td class="n">–</td><td class="n">+3.4%</td></tr>
+<tr><td>identity ops</td><td>4457fc3</td><td class="n">+3%</td><td class="n">~0</td></tr>
+<tr><td>CONV_RES</td><td>fa85426</td><td class="n">–</td><td class="n">26.4 → 27.0</td></tr>
+<tr><td>depth-mix cache</td><td>151e465</td><td class="n">–</td><td class="n">not measurable</td></tr>
+<tr><td>wider reorder</td><td>e3c63bc</td><td class="n">–</td><td class="n">27.6 → 28.4</td></tr>
+<tr><td>fused depth mix</td><td>7ff2d42</td><td class="n">–</td><td class="n">+2.1% (A/B)</td></tr>
+<tr><td>batched depth mix (two commits)</td><td>be29e28, 35c0667</td><td class="n">288 → 330</td><td class="n">–</td></tr>
+<tr><td>table-free NVFP4 dequant</td><td>51bac5a</td><td class="n">330 → 343</td><td class="n">–</td></tr>
+<tr><td>REL_BIAS, CONV_TAIL, graph changes</td><td>85c9b12 … bbff17b</td><td class="n">343 → 362</td><td class="n">28.0 → 28.4</td></tr>
+</tbody></table>
+</details>
+</figure>
+</section>
+
+<section id="didnt">
+<h2>10. What did not work</h2>
+<ul>
+<li><strong>Graph capture.</strong> Recording the command stream once and replaying it saves CPU encoding time. The GPU was already busy 35.0 of 35.6 ms per token, so the most capture could recover was about 0.6 ms. Not worth it.</li>
+<li><strong>A persistent megakernel.</strong> One long-running kernel per layer, with threadgroups syncing through a counter in device memory instead of barriers. Our probes (<code>inkling-engine/mega/sync.mm</code>) found the counter sync itself reliable up to 30,720 co-resident threads, and a persistent mat-vec kept full bandwidth. But plain stores from one threadgroup were not reliably visible to other threadgroups within the same dispatch: stale reads in 1–8 of 300 trials on a quiet GPU and up to 20 of 20 when another process used it, all silent. Metal's atomics are relaxed-only, so there is nothing to order the data behind the counter. The gain would have been at most about 0.3 µs per level anyway, against about 1.5 µs for removing the level by fusion.</li>
+<li><strong>Caching the looped weights.</strong> Passes 2 and 3 read the same 12 layers again, so why not keep them on chip? One pass reads about 780 MB, and the on-chip caches hold tens of megabytes. Only batching, which speculative decoding provides, amortizes those reads.</li>
+<li><strong>More command buffers.</strong> llama.cpp encodes a small first command buffer on the calling thread while helper threads encode the rest. A smaller first buffer and more encoder threads were both worse.</li>
+<li><strong>A longer reorder look-ahead.</strong> 128 or 256 nodes instead of 64: neutral or worse.</li>
+<li><strong>Fusing the controllers' down projection:</strong> neutral.</li>
+<li><strong>Lower-bit attention.</strong> Requantizing attention from Q8_0 to Q6_K gave +4% decode, but KL divergence against upstream went from 0.0017 to 0.0029. Our rule from the start was that no change trades away quality, so it was dropped.</li>
+</ul>
+</section>
+
+<section id="spec">
+<h2>11. Speculative decoding</h2>
+<p>Speculative decoding drafts several tokens cheaply and checks them in one forward pass of the full model. On a dense model, verifying a few tokens costs about as much as decoding one, because the weights are read once. On a MoE model each token picks its own 8 experts, and tokens rarely share them, so verifying more tokens reads more expert weights (Figure 11, top): 33.9 ms for one token, 52.5 for two, 117 for eight. From two tokens on, each extra token adds about 0.32 of a plain decode step.</p>
+<p><a href="https://github.com/ggml-org/llama.cpp/pull/32218">DSpark</a> (PR #32218 by Piotr Wilkin, <a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/fc9388d">fc9388d</a> here) adds a block drafter for Inkling 2 that proposes up to 7 tokens per pass. Its Markov head conditions each drafted token on the previous one, and each of those 7 steps multiplies by the target model's full output head: a 318 MB read per step, 2.2 GB for all seven. A drafter pass took 29 ms, against 33.9 ms for a plain token. We made two changes:</p>
+<ul>
+<li><strong>A Markov-step cap</strong> (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/4b7c0dc">4b7c0dc</a>). The drafter ran all 7 steps no matter how many drafts the caller would read. <code>LLAMA_DSPARK_MARKOV_STEPS</code> stops the chain early and passes the batched logits through for the rest; drafts are identical. With 3 steps a drafter pass takes 17.6 ms. Measured early, before the decode work, DSpark with 2 drafts and the cap ran 24.6 tokens/s against 23.84 plain (+3%), and +27% on a code prompt. Once plain decode got about 20% faster, the same setting lost on prose (21–22.5 against 29.0 tokens/s).</li>
+<li><strong>A gate</strong> (<a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/c757228">c757228</a>), following the design in Locals' notes. Drafting stops at the first token the drafter gives less than 0.8 probability. That threshold (<code>--spec-draft-p-min</code>) did not work for Inkling 2 before: the old check read the drafter's context features where it expected confidence values, and stopped at once. It now uses the softmax probability of the drafted token, computed on the host. After tries that lose time, drafting pauses for 32 tokens, doubling up to 256, and a winning try resets the pause length to 32 (Figure 11, bottom). Empty drafts count as losses.</li>
+</ul>
+<p>The gate scores each try in plain decode steps: tokens accepted minus an estimated cost of 0.85 steps for the drafter pass, 0.24 for the verify, and 0.32 per drafted token.</p>
+<pre><code>const float gain = n_accepted - (draft_cost + verify_cost + token_cost * last_len[seq_id]);
+...
+credit[seq_id] = std::min(credit[seq_id] + gain, 2.0f);
+if (gain &gt; 0.0f) {
+    backoff[seq_id] = 32;
+}
+if (credit[seq_id] &lt; 0.0f) {
+    skip_left[seq_id] = backoff[seq_id];
+    backoff[seq_id]   = std::min(backoff[seq_id] * 2, 256);
+    credit[seq_id]    = 0.0f;
+}</code></pre>
+
+<figure id="fig11">
+<svg class="d" viewBox="0 0 480 436" width="480" height="436" role="img" aria-labelledby="f11t f11d">
+<title id="f11t">Verify cost by batch size, and the gate's backoff</title>
+<desc id="f11d">Top: time for one forward pass of the full model by tokens verified at once: 1 token 33.9 ms, 2 tokens 52.5, 3 tokens 63.9, 4 tokens 73.9, 5 tokens 85.7, 6 tokens 95.3, 8 tokens 117; 7 was not measured. A drafter pass takes 29 ms with 7 Markov steps and 17.6 ms with 3. Bottom: after a losing try the gate pauses drafting for 32 tokens, then 64, 128 and 256 after further losses; a winning try resets the pause to 32.</desc>
+<text x="0" y="16" class="b s15">Verify cost grows with every token</text>
+<text x="0" y="34" class="t2 s12">ms for one forward pass of the full model, by tokens verified at once</text>
+<path d="M62,210 V177.7 A4,4 0 0 1 66,173.7 H78 A4,4 0 0 1 82,177.7 V210 Z" class="fb"><title>verify 1 token: 33.9 ms</title></path>
+<path d="M98,210 V157.8 A4,4 0 0 1 102,153.8 H114 A4,4 0 0 1 118,157.8 V210 Z" class="fb"><title>verify 2 tokens: 52.5 ms</title></path>
+<path d="M134,210 V145.5 A4,4 0 0 1 138,141.5 H150 A4,4 0 0 1 154,145.5 V210 Z" class="fb"><title>verify 3 tokens: 63.9 ms</title></path>
+<path d="M170,210 V134.8 A4,4 0 0 1 174,130.8 H186 A4,4 0 0 1 190,134.8 V210 Z" class="fb"><title>verify 4 tokens: 73.9 ms</title></path>
+<path d="M206,210 V122.2 A4,4 0 0 1 210,118.2 H222 A4,4 0 0 1 226,122.2 V210 Z" class="fb"><title>verify 5 tokens: 85.7 ms</title></path>
+<path d="M242,210 V111.9 A4,4 0 0 1 246,107.9 H258 A4,4 0 0 1 262,111.9 V210 Z" class="fb"><title>verify 6 tokens: 95.3 ms</title></path>
+<path d="M314,210 V88.6 A4,4 0 0 1 318,84.6 H330 A4,4 0 0 1 334,88.6 V210 Z" class="fb"><title>verify 8 tokens: 117 ms</title></path>
+<line x1="52" y1="173.7" x2="470" y2="173.7" class="lm"/>
+<text x="470" y="168.7" text-anchor="end" class="t2 s11">1 plain token = 33.9 ms</text>
+<text x="72" y="168.7" text-anchor="middle" class="s11">33.9</text><text x="108" y="148.8" text-anchor="middle" class="s11">52.5</text><text x="144" y="136.5" text-anchor="middle" class="s11">63.9</text><text x="180" y="125.8" text-anchor="middle" class="s11">73.9</text>
+<text x="216" y="113.2" text-anchor="middle" class="s11">85.7</text><text x="252" y="102.9" text-anchor="middle" class="s11">95.3</text><text x="288" y="204" text-anchor="middle" class="tm s11">–</text><text x="324" y="79.6" text-anchor="middle" class="s11 b">117</text>
+<line x1="52" y1="210" x2="344" y2="210" class="ax"/>
+<text x="72" y="226" text-anchor="middle" class="s12">1</text><text x="108" y="226" text-anchor="middle" class="s12">2</text><text x="144" y="226" text-anchor="middle" class="s12">3</text><text x="180" y="226" text-anchor="middle" class="s12">4</text>
+<text x="216" y="226" text-anchor="middle" class="s12">5</text><text x="252" y="226" text-anchor="middle" class="s12">6</text><text x="288" y="226" text-anchor="middle" class="s12">7</text><text x="324" y="226" text-anchor="middle" class="s12">8</text>
+<text x="198" y="244" text-anchor="middle" class="t2 s12">tokens verified at once</text>
+<text x="356" y="108" class="b s12">drafter pass</text>
+<text x="356" y="124" class="t2 s11">7 Markov steps: 29 ms</text>
+<text x="356" y="140" class="t2 s11">3 steps: 17.6 ms</text>
+<text x="0" y="286" class="b s15">The gate backs off after losing tries</text>
+<text x="0" y="304" class="t2 s12">tokens generated →; pauses drawn to scale</text>
+<rect x="8" y="328" width="12" height="12" rx="2" class="fo"><title>try that lost steps</title></rect>
+<rect x="24" y="330" width="24" height="8" rx="2" class="skipb"><title>no drafting for 32 tokens</title></rect>
+<rect x="52" y="328" width="12" height="12" rx="2" class="fo"><title>try that lost steps</title></rect>
+<rect x="68" y="330" width="48" height="8" rx="2" class="skipb"><title>no drafting for 64 tokens</title></rect>
+<rect x="120" y="328" width="12" height="12" rx="2" class="fo"><title>try that lost steps</title></rect>
+<rect x="136" y="330" width="96" height="8" rx="2" class="skipb"><title>no drafting for 128 tokens</title></rect>
+<rect x="236" y="328" width="12" height="12" rx="2" class="fo"><title>try that lost steps</title></rect>
+<rect x="252" y="330" width="192" height="8" rx="2" class="skipb"><title>no drafting for 256 tokens</title></rect>
+<rect x="448" y="328" width="12" height="12" rx="2" class="fb"><title>try that gained steps</title></rect>
+<text x="36" y="322" text-anchor="middle" class="t2 s11">32</text><text x="92" y="322" text-anchor="middle" class="t2 s11">64</text><text x="184" y="322" text-anchor="middle" class="t2 s11">128</text><text x="348" y="322" text-anchor="middle" class="t2 s11">256 (cap)</text>
+<text x="8" y="362" class="t2 s12">each losing try doubles the pause</text>
+<text x="460" y="362" text-anchor="end" class="t2 s12">a win resets it to 32</text>
+<rect x="8" y="383" width="12" height="12" rx="2" class="fo"/><text x="26" y="393" class="s12">try that lost steps</text>
+<rect x="170" y="383" width="12" height="12" rx="2" class="fb"/><text x="188" y="393" class="s12">try that gained</text>
+<rect x="312" y="385" width="22" height="8" rx="2" class="skipb"/><text x="340" y="393" class="s12">no drafting</text>
+<text x="0" y="424" class="mono s11 t2">gain = accepted − (0.85 + 0.24 + 0.32 × drafted)</text>
+</svg>
+<figcaption><b>Figure 11.</b> Top: verify cost on the M5 (one llama.cpp forward pass per batch size; 7 tokens was not measured). Verifying 8 tokens costs 3.45 plain tokens, before the drafter's own cost. Bottom: the gate from <a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/c757228">c757228</a>. Strictly, a pause starts when a try leaves the running credit below zero; a credit of up to 2 steps from earlier wins can absorb a loss.</figcaption>
+<details class="data"><summary>Data table</summary>
+<table><thead><tr><th>tokens verified</th><th class="n">ms</th><th class="n">plain steps</th></tr></thead>
+<tbody><tr><td>1</td><td class="n">33.9</td><td class="n">1.00</td></tr><tr><td>2</td><td class="n">52.5</td><td class="n">1.55</td></tr><tr><td>3</td><td class="n">63.9</td><td class="n">1.88</td></tr><tr><td>4</td><td class="n">73.9</td><td class="n">2.18</td></tr><tr><td>5</td><td class="n">85.7</td><td class="n">2.53</td></tr><tr><td>6</td><td class="n">95.3</td><td class="n">2.81</td></tr><tr><td>7</td><td class="n">–</td><td class="n">–</td></tr><tr><td>8</td><td class="n">117</td><td class="n">3.45</td></tr>
+<tr><td>drafter, 7 Markov steps</td><td class="n">29</td><td class="n">0.86</td></tr><tr><td>drafter, 3 Markov steps</td><td class="n">17.6</td><td class="n">0.52</td></tr></tbody></table>
+<p class="note">Plain steps are derived: ms divided by 33.9.</p>
+</details>
+</figure>
+
+<p>The results, on <code>llama-server</code> at temperature 0. Prose is three short prompts, code is one function-writing prompt (both up to 256 tokens), and copy is rewriting a 144-line Python file with one function renamed (thinking off, up to 1,600 tokens). Tokens/s:</p>
+<div class="wide">
+<table>
+<thead><tr><th>setup</th><th class="n">prose</th><th class="n">code</th><th class="n">copy</th></tr></thead>
+<tbody>
+<tr><td>plain decoding</td><td class="n">27.1–28.6</td><td class="n">27.9</td><td class="n">24.6</td></tr>
+<tr><td>DSpark, 7 drafts, ungated (as in PR #32218)</td><td class="n">12.7–15.2</td><td class="n">23.6</td><td class="n">39.7</td></tr>
+<tr><td>DSpark, 7 drafts, gated</td><td class="n">25.7–26.6</td><td class="n">28.2</td><td class="n">39.5</td></tr>
+<tr><td>gated, Markov cap 3</td><td class="n">26.4–26.8</td><td class="n">29.2</td><td class="n">32.9</td></tr>
+<tr><td>n-gram drafts only (upstream <code>ngram-mod</code>)</td><td class="n">28.6–28.8</td><td class="n">28.0</td><td class="n">78.0</td></tr>
+<tr class="hi"><td>n-gram, then gated DSpark</td><td class="n">26.5–26.9</td><td class="n">28.4</td><td class="n">85.1</td></tr>
+</tbody>
+</table>
+</div>
+<p>What we take from it:</p>
+<ul>
+<li>n-gram drafts need no draft model, lost nothing on prose or code in these runs, and give 3.2× on copy. They are the right default.</li>
+<li>Gated DSpark on top adds 9% on copy (85.1 against 78.0, 3.5× plain) and 1.5% on code, and costs about 6% on prose: the drafter's per-token context update runs even while drafting is paused. Locals reports a similar cost for its own drafter on prose, about 4%.</li>
+<li>The gate turns ungated DSpark's halving of prose speed into a loss of a few percent, and keeps its copy gain.</li>
+<li>Code and copy outputs are identical to plain decoding. Two of the three prose replies flip at a near-tie in the reasoning under batched verify.</li>
+<li>The lever left: each Markov step re-reads the whole 318 MB head. Biasing only the base model's top-K rows would make wide drafts nearly free.</li>
+</ul>
+</section>
+
+<section id="mlx">
+<h2>12. MLX, side by side</h2>
+<p>We ran <a href="https://huggingface.co/mlx-community/Inkling-2-Mini-4bit">mlx-community/Inkling-2-Mini-4bit</a> with mlx-lm PR #2086 on the same Mac, once, partway through the work. MLX decoded 27.2–27.7 tokens/s against our 28.1–28.3 at the time, and processed prompts at 411–421 against our 276–281; the batched-mix work and the later changes brought ours to 362.</p>
+<p>The quants differ, so this compares two practical setups, not two engines on identical weights:</p>
+<table>
+<thead><tr><th></th><th>MLX 4&#8209;bit</th><th>this repo, UD-Q3_K_XL</th></tr></thead>
+<tbody>
+<tr><td>experts</td><td>NVFP4 / MXFP8</td><td>NVFP4, 8 of 40 tensors at 2–3.4 bits; MXFP8 layers at 3–4.5 bits</td></tr>
+<tr><td>attention</td><td>4-bit</td><td>Q8_0</td></tr>
+<tr><td>decode, tokens/s</td><td>27.2–&#8288;27.7</td><td>28.4</td></tr>
+<tr><td>prefill, tokens/s</td><td>411–&#8288;421</td><td>362</td></tr>
+</tbody>
+</table>
+<p>Our decode is ahead while reading 8-bit attention weights; MLX still leads on prefill. We did not profile MLX, so we will not guess where its prefill lead comes from.</p>
+</section>
+
+<section id="roofline">
+<h2>13. How close to the limit</h2>
+<p>Decode reads every active weight once per token. For this file that is about 3.45 GB: 48 layer visits of attention, router and 8 experts, plus the output head. At the 125 GB/s we measured, reading it takes 27.6 ms, a ceiling of about 36 tokens/s. At 28.4 tokens/s we are at 78% of it (Figure 12).</p>
+
+<figure id="fig12">
+<svg class="d" viewBox="0 0 480 292" width="480" height="292" role="img" aria-labelledby="f12t f12d">
+<title id="f12t">Decode speed against the memory-bandwidth ceiling</title>
+<desc id="f12d">Each token reads about 3.45 GB. At the measured 125 GB/s the ceiling is 36.2 tokens per second; at the nominal 153 GB/s it would be 44.3. Upstream decodes 15.9 and this repo 28.4, 78% of the measured ceiling. Of the 35.2 ms per token, 27.6 ms is the time to stream the weights at 125 GB/s, an estimated 2.7 ms is barrier levels and about 4.9 ms is not broken down.</desc>
+<text x="0" y="16" class="b s15">Decode against the bandwidth ceiling</text>
+<text x="0" y="34" class="t2 s12">tokens/s; each token reads about 3.45 GB of weights</text>
+<line x1="454.8" y1="52" x2="454.8" y2="126" class="lm"/>
+<text x="449" y="48" text-anchor="end" class="t2 s11">nominal: 44.3</text>
+<line x1="389.9" y1="66" x2="389.9" y2="126" class="ceil"/>
+<text x="384" y="62" text-anchor="end" class="s12">125 GB/s measured: 36.2</text>
+<text x="92" y="85" text-anchor="end" class="s13">upstream</text>
+<text x="92" y="115" text-anchor="end" class="s13 b">this repo</text>
+<path d="M100,72 H223.2 A4,4 0 0 1 227.2,76 V84 A4,4 0 0 1 223.2,88 H100 Z" class="fg"><title>upstream: 15.9 tok/s</title></path>
+<path d="M100,102 H323.2 A4,4 0 0 1 327.2,106 V114 A4,4 0 0 1 323.2,118 H100 Z" class="fb"><title>this repo: 28.4 tok/s</title></path>
+<text x="233.2" y="85" class="s12">15.9</text>
+<text x="333.2" y="115" class="s12 b">28.4</text>
+<line x1="100" y1="66" x2="100" y2="126" class="ax"/>
+<line x1="100" y1="126" x2="460" y2="126" class="ax"/>
+<path d="M100,126 V130 M180,126 V130 M260,126 V130 M340,126 V130 M420,126 V130" class="ax"/>
+<text x="100" y="144" text-anchor="middle" class="tm s11">0</text><text x="180" y="144" text-anchor="middle" class="tm s11">10</text><text x="260" y="144" text-anchor="middle" class="tm s11">20</text><text x="340" y="144" text-anchor="middle" class="tm s11">30</text><text x="420" y="144" text-anchor="middle" class="tm s11">40</text>
+<text x="100" y="166" class="t2 s12">28.4 is 78% of the measured ceiling</text>
+<text x="0" y="200" class="b s13">35.2 ms per token at 28.4 tok/s</text>
+<rect x="10" y="212" width="360.6" height="28" rx="4" class="sgb"><title>27.6 ms: 3.45 GB at 125 GB/s</title></rect>
+<rect x="372.6" y="212" width="32.9" height="28" rx="4" class="sgo"><title>about 2.7 ms: 1,783 barrier levels at about 1.5 µs (estimate)</title></rect>
+<rect x="407.5" y="212" width="62.5" height="28" rx="4" class="sgg"><title>about 4.9 ms: not broken down</title></rect>
+<text x="20" y="231" class="s12">27.6 ms: 3.45 GB at 125 GB/s</text>
+<line x1="389" y1="240" x2="389" y2="250" class="lm"/>
+<text x="405" y="263" text-anchor="end" class="s12">~2.7 ms barrier levels (estimate)</text>
+<line x1="439" y1="240" x2="439" y2="270" class="lm"/>
+<text x="470" y="283" text-anchor="end" class="s12">~4.9 ms not broken down</text>
+</svg>
+<figcaption><b>Figure 12.</b> The decode roofline for this file. The ceilings are 3.45 GB per token at 125 GB/s (measured) and at 153 GB/s (nominal; we never measured a streaming read near it). The split of the 35.2 ms is partly an estimate: the barrier slice assumes each remaining level costs what removed levels saved.</figcaption>
+<details class="data"><summary>Data table</summary>
+<table><thead><tr><th>quantity</th><th class="n">value</th><th>source</th></tr></thead>
+<tbody><tr><td>weights read per token</td><td class="n">~3.45 GB</td><td>measured</td></tr><tr><td>streaming bandwidth</td><td class="n">~125 GB/s</td><td>measured</td></tr><tr><td>ceiling</td><td class="n">36.2 tok/s</td><td>derived</td></tr><tr><td>this repo</td><td class="n">28.4 tok/s (78%)</td><td>measured</td></tr><tr><td>streaming floor</td><td class="n">27.6 ms</td><td>derived</td></tr><tr><td>barrier levels</td><td class="n">~2.7 ms</td><td>estimate</td></tr><tr><td>rest</td><td class="n">~4.9 ms</td><td>derived remainder</td></tr></tbody></table>
+</details>
+</figure>
+
+<p>Where the other 7.6 ms go is partly an estimate. If each of the 1,783 remaining barrier levels costs what removed levels saved, that is about 2.7 ms. That is about 37 levels per visit, mostly in the depth-mix and loop-control prologue. The remaining 4.9 ms we have not broken down. Known candidates: the NVFP4 <code>ffn_down</code> mat-vec runs at about 84% of bandwidth (worth about 0.5 ms), and the expert tensors that are not NVFP4 (IQ2_S, IQ3_XXS, IQ3_S, Q3_K, IQ4_NL) still run on upstream's kernels for those types; faster ones are an open item we estimate at about 1 ms. The output head already streams at 129 GB/s.</p>
+<p>Other quants move the ceiling. Bytes per token, with the ceiling at 125 GB/s:</p>
+<table>
+<thead><tr><th>quant</th><th class="n">GB per token</th><th class="n">ceiling, tok/s</th></tr></thead>
+<tbody>
+<tr><td>UD-Q3_K_XL (this post)</td><td class="n">3.45</td><td class="n">36.2</td></tr>
+<tr><td>IQ4_XS</td><td class="n">~3.68</td><td class="n">~34.0</td></tr>
+<tr><td>UD-Q4_K_XL (keeps every NVFP4 expert)</td><td class="n">~3.92</td><td class="n">~31.9</td></tr>
+<tr><td>UD-Q8_K_XL (22.9 GB, does not fit a 24 GB Mac)</td><td class="n">~5.64</td><td class="n">~22.2</td></tr>
+</tbody>
+</table>
+</section>
+
+<section id="caveats">
+<h2>14. Caveats</h2>
+<ul>
+<li>One machine and one quant. Benchmark noise is about ±0.6 tokens/s. Everything was measured on battery with Low Power Mode off.</li>
+<li>The quality numbers compare this engine with upstream on the same file. They do not measure what the quant itself loses against the released weights: UD-Q3_K_XL cuts 8 of the 40 NVFP4 expert tensors to 2–3.4 bits. UD-Q4_K_XL (17.6 GB) keeps them all but needs a raised GPU memory limit on a 24 GB Mac.</li>
+<li>Perplexity was not rerun after the last two fusions; <code>dcheck</code> was.</li>
+<li>MLX was measured once, with a different quant.</li>
+<li>Nothing here is upstream yet. Debug switches (<code>GGML_METAL_PROFILE</code>, <code>GGML_METAL_GRAPH_DUMP</code>, <code>INK_SKIP_*</code>) are still in the tree, and the Markov-step cap is an environment variable where a proper fix would pass the draft count through.</li>
+<li>CPU-only mode is broken upstream for this model (perplexity about 140,000), a separate bug we did not touch.</li>
+</ul>
+</section>
+
+<section id="verdict">
+<h2>15. So, should you write your own engine?</h2>
+<p>For this model on this Mac, no.</p>
+<p>The two big wins fit llama.cpp's existing structure. The NVFP4 kernels slot into the Metal kernel tables next to MXFP4. Each fusion is an entry in ggml-metal's fusion table plus one kernel. The reorder change is eight case labels, and the graph changes are a few lines in the model file. In all, 36 commits, each small enough to review on its own.</p>
+<p>The things a custom engine would have let us try beyond that did not pay: a persistent megakernel is unsafe on Metal's relaxed-only atomics, graph capture is worth at most 0.6 ms, and the looped weights do not fit on chip.</p>
+<p>What is left is mostly hardware and structure: about 125 GB/s of streaming bandwidth, a model that re-reads about 780 MB per loop pass, and a MoE whose verify cost grows with every token. We are at 78% of the bandwidth ceiling. The next gains are more fusion in the mix and controller prologue and faster kernels for the remaining expert types, not a rewrite.</p>
+<p>What llama.cpp did need was a kernel for a format it had not seen, a reorder whitelist that was too cautious for an unusual graph, and fusions for chains that only this model has. Those are contributions, and the NVFP4 kernels are the first we would send upstream.</p>
+</section>
+
+<section id="credits">
+<h2>16. Credits</h2>
+<ul>
+<li>The <a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a> and ggml contributors: everything here builds on their Metal backend, scheduler, fusion table and tools.</li>
+<li>Daniel Han for the inkling2_loop fix (<a href="https://github.com/ggml-org/llama.cpp/pull/32704">#32704</a>), and Unsloth for the GGUFs.</li>
+<li>Piotr Wilkin for DSpark (<a href="https://github.com/ggml-org/llama.cpp/pull/32218">PR #32218</a>).</li>
+<li><a href="https://github.com/Generated-Computers/Locals">Locals</a> for the idea of fusing every stretch of small ops between weight reads, and for the gating design.</li>
+</ul>
+</section>
+
+<section id="commits">
+<h2>17. Appendix: every commit</h2>
+<p class="note">In build order, on top of <a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/9213dfe">9213dfe</a> (upstream llama.cpp at 46eb174). Decode is tg, prefill is pp512, tokens/s.</p>
+<div class="wide">
+<table>
+<thead><tr><th>commit</th><th>change</th><th>measured</th></tr></thead>
+<tbody>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/0f29f91">0f29f91</a></td><td>Upstream fix #32704: re-share the loop slots after the scale pass</td><td>without it PPL ~67 instead of 4.4</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/c653231">c653231</a></td><td><code>LLAMA_QUANT_ONLY_MATCHED</code>: requantize only the tensors a pattern matches</td><td>tool</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/48a4afd">48a4afd</a></td><td><code>GGML_METAL_PROFILE</code>: per-encoder GPU timestamp profiler</td><td>40.6 ms decode profile</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/1097941">1097941</a></td><td><code>INKLING_PERF</code>: test-backend-ops perf cases at this model's shapes</td><td>tool</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/eb5de01">eb5de01</a></td><td><code>GGML_METAL_MVID_NSG</code>: simdgroup count override for the MoE mat-vec</td><td>tuning knob</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/54ce6c4">54ce6c4</a></td><td>Native NVFP4 mul_mv, mul_mv_id, mul_mm, mul_mm_id</td><td>pp 42.8 → 251, tg 15.9 → 24.2; PPL 4.412 vs 4.423, KLD 0.0019</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/7aca306">7aca306</a></td><td>Grouped NVFP4 mul_mv_id for 2 to 8 tokens</td><td>small gain at 8 tokens, neutral at 4</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/44dc8cb">44dc8cb</a></td><td><code>GGML_METAL_GRAPH_DUMP</code>: print a large graph's nodes</td><td>tool</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/659aa87">659aa87</a></td><td>L2_CLIP fusion</td><td>tg 24.17 → 25.13, pp 251 → 263</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/48bd597">48bd597</a></td><td>SITU fusion</td><td>tg 25.56, pp 280</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/f32b088">f32b088</a></td><td>LOOP_CTRL fusion</td><td>tg +0.8%</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/f91b658">f91b658</a></td><td>F16 router and loop-control weights</td><td>tg +3.4%, KLD unchanged</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/4457fc3">4457fc3</a></td><td>Drop identity ops</td><td>tg about unchanged, pp +3%</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/0b823b1">0b823b1</a></td><td><code>INK_SKIP_MIX</code>, <code>INK_SKIP_CONV</code> timing switches</td><td>conv ~2.0 ms, mix 1.3–2.0 ms per token</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/fa85426">fa85426</a></td><td>CONV_RES fusion</td><td>tg 26.4 → 27.0</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/151e465">151e465</a></td><td>Cache the normalized block stack of the depth mix</td><td>no measurable gain alone</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/e3c63bc">e3c63bc</a></td><td>Wider graph reorder whitelist</td><td>levels 3,257 → 2,656, tg 27.6 → 28.4</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/7c16ae2">7c16ae2</a></td><td><code>INKLING_PERF</code> covers IQ2_XS</td><td>tool</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/7ff2d42">7ff2d42</a></td><td>MIX fusion</td><td>levels 2,656 → 2,213, tg +2.1%</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/fc82a96">fc82a96</a></td><td><code>INKLING_PERF</code> adds 512-token MoE batches</td><td>tool</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/be29e28">be29e28</a></td><td>Cached mix prefix at any batch size</td><td>pp +8.4%</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/35c0667">35c0667</a></td><td>MIX fusion over a (query, token) grid</td><td>pp +5.8%; 288 → 330 with be29e28</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/51bac5a">51bac5a</a></td><td>NVFP4 dequant without table lookups</td><td>pp 330 → 343</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/85c9b12">85c9b12</a></td><td>Emit the sinks and each layer tail in fusion order</td><td>node order only</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/ad73b19">ad73b19</a></td><td>Cast the F32 attention mask once per graph</td><td>was 48 casts per token</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/f59b466">f59b466</a></td><td>Alloc deps for every matching fusion pattern</td><td>correctness</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/b1f549c">b1f549c</a></td><td>CONV_TAIL fusion, without alloc deps</td><td>see next row</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/bbff17b">bbff17b</a></td><td>REL_BIAS fusion (tag m5-benchmarked-build)</td><td>levels 2,131 → 1,783, tg 28.0 → 28.4, pp 343 → 362</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/fc9388d">fc9388d</a></td><td>DSpark block drafting, upstream PR #32218</td><td>speculative decoding</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/4b7c0dc">4b7c0dc</a></td><td><code>LLAMA_DSPARK_MARKOV_STEPS</code> caps the Markov steps</td><td>identical drafts; +3% prose, +27% code (first day)</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/c757228">c757228</a></td><td>Gate DSpark by p_min and back off after losses</td><td>see the table in section 11</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/b628ad9">b628ad9</a></td><td>Microbenchmarks: bandwidth, mat-vec, per-node timing, megakernel probes</td><td>~125 GB/s streaming read</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/6b89537">6b89537</a></td><td><code>dcheck</code> logit checker and benchmark scripts</td><td>tool</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/e54b5f9">e54b5f9</a></td><td>Side-by-side chat UI, upstream vs this repo</td><td>tool</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/09f2782">09f2782</a></td><td>TODO.md with every measurement and decision</td><td>notes</td></tr>
+<tr><td><a class="c" href="https://github.com/Koosh0610/llama.cpp-inkling/commit/7898c76">7898c76</a></td><td>README with the results</td><td>notes</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+</article>
+</main>
+<footer>
+<p>Koosh0610 · Source and measurements: <a href="https://github.com/Koosh0610/llama.cpp-inkling">github.com/Koosh0610/llama.cpp-inkling</a>, tag <a href="https://github.com/Koosh0610/llama.cpp-inkling/tree/m5-benchmarked-build">m5-benchmarked-build</a>.</p>
+</footer>
+</body>
+</html>
