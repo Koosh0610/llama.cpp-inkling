@@ -766,6 +766,15 @@ typedef struct {
 } ggml_metal_kargs_conv_res;
 
 typedef struct {
+    int32_t  C;      // channels
+    int32_t  K;      // conv taps
+    int32_t  Ks;     // state columns kept per channel
+    uint64_t nbp1;   // past channel stride
+    float    scale;
+    int32_t  has_res;
+} ggml_metal_kargs_conv_tail;
+
+typedef struct {
     int32_t  IC;
     int32_t  IH;
     int32_t  IW;

@@ -685,6 +685,46 @@ kernel void kernel_conv_res_f32(
     }
 }
 
+// one token: x = [past[c, :], y[c]], state[c, :] = x[K - Ks:], dst[c] = res[c] + (y[c] + sum_k cw[c, k]*x[k])*scale.
+// each thread reads only its own channel, so dst may alias y or res
+kernel void kernel_conv_tail_f32(
+        constant ggml_metal_kargs_conv_tail & args,
+        device const char  * past,
+        device const float * cw,
+        device const float * y,
+        device const float * res,
+        device       float * sdst,
+        device       float * dst,
+        uint    tgpig [[threadgroup_position_in_grid]],
+        ushort  tpitg [[thread_position_in_threadgroup]],
+        ushort  ntg   [[threads_per_threadgroup]]) {
+    const int c = tgpig*ntg + tpitg;
+    if (c >= args.C) {
+        return;
+    }
+
+    float x[8];
+    device const float * pc = (device const float *) (past + c*args.nbp1);
+    for (int k = 0; k < args.K - 1; ++k) {
+        x[k] = pc[k];
+    }
+    x[args.K - 1] = y[c];
+
+    device const float * wc = cw + c*args.K;
+    float acc = 0.0f;
+    for (int k = 0; k < args.K; ++k) {
+        acc += wc[k]*x[k];
+    }
+
+    const float v = (x[args.K - 1] + acc)*args.scale;
+    const float r = args.has_res ? res[c] : 0.0f;
+    dst[c] = args.has_res ? r + v : v;
+
+    for (int k = 0; k < args.Ks; ++k) {
+        sdst[c*args.Ks + k] = x[args.K - args.Ks + k];
+    }
+}
+
 // y = b*tanh(g/b)*sigmoid(g) * lb*tanh(u/lb); g, u strided views with contiguous rows, y contiguous
 kernel void kernel_situ_f32(
         constant ggml_metal_kargs_situ & args,

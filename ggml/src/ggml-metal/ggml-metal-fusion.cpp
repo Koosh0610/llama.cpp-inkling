@@ -893,6 +893,37 @@ static bool ggml_metal_fusion_raw_span_ok(const ggml_cgraph * gf, const int * no
     return ggml_can_fuse_subgraph_ext(gf, raw, n, ops, outs, 1 + n_extra_outs);
 }
 
+// as ggml_metal_fusion_raw_span_ok, but a view of a tensor outside the span counts as a kernel input
+static bool ggml_metal_fusion_raw_span_inputs_ok(const ggml_cgraph * gf, const int * node_idxs, int idx, int n_ops, int extra_out) {
+    const int i0 = node_idxs[idx];
+    const int i1 = node_idxs[idx + n_ops - 1];
+    if (i1 - i0 + 1 > 64) {
+        return false;
+    }
+    for (int i = i0; i <= i1; ++i) {
+        const ggml_tensor * node = gf->nodes[i];
+        if ((node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+            return false;
+        }
+        if (i == i1 || i == extra_out) {
+            continue;
+        }
+        if (node->flags & GGML_TENSOR_FLAG_OUTPUT) {
+            return false;
+        }
+        int uses = 0;
+        for (int j = i + 1; j <= i1; ++j) {
+            for (int k = 0; k < GGML_MAX_SRC; ++k) {
+                uses += gf->nodes[j]->src[k] == node;
+            }
+        }
+        if (uses != ggml_node_get_use_count(gf, i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static const std::vector<ggml_op> ops_conv_res = { GGML_OP_SSM_CONV, GGML_OP_ADD, GGML_OP_SCALE };
 
 // ssm_conv(x, w) | add(cur, conv) | scale, one sequence, contiguous x and w (the conv state store is emitted earlier)
@@ -1007,6 +1038,85 @@ static bool ggml_metal_fusion_check_mix(
         o->ne[0] == C && o->ne[1] == NQ && o->ne[2] == T &&
         K <= 16 && NQ <= 8;
 }
+
+// the tensor a chain of views reads
+static const ggml_tensor * ggml_metal_fusion_view_base(const ggml_tensor * t) {
+    while (t && t->view_src) {
+        t = t->view_src;
+    }
+    return t;
+}
+
+// one token: x = concat(past, y, 0) | cpy(x[K - Ks:], state) | ssm_conv(x, cw) | add(y, conv) | scale | [add(res, .)]
+static bool ggml_metal_fusion_check_conv_tail(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * n,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(mode);
+
+    if (getenv("GGML_METAL_NO_CONV_TAIL")) {
+        return false;
+    }
+
+    const int nops = (int) fusion->ops.size();
+    if (!ggml_metal_fusion_raw_span_inputs_ok(gf, node_idxs, idx, nops, node_idxs[idx + 1])) {
+        return false;
+    }
+
+    const ggml_tensor * cat = n[0];
+    const ggml_tensor * cpy = n[1];
+    const ggml_tensor * cnv = n[2];
+    const ggml_tensor * add = n[3];
+    const ggml_tensor * sc  = n[4];
+
+    const ggml_tensor * past = cat->src[0];
+    const ggml_tensor * cw   = cnv->src[1];
+    const ggml_tensor * y    = ggml_metal_fusion_view_base(cat->src[1]);
+    const ggml_tensor * cs   = cpy->src[0];
+    const ggml_tensor * cd   = cpy->src[1];
+
+    const int64_t C  = cnv->ne[0];
+    const int64_t K  = cw->ne[0];
+    const int64_t Ks = cs->ne[0];
+
+    const auto is_cnv = [&](const ggml_tensor * t) { return t == cnv || (t && t->view_src == cnv && ggml_is_contiguous(t)); };
+    const auto is_y   = [&](const ggml_tensor * t) { return t == y   || (t && t->view_src == y   && ggml_is_contiguous(t) && t->view_offs == 0); };
+
+    if (!y || y->type != GGML_TYPE_F32 || !ggml_is_contiguous(y) || ggml_nelements(y) != C ||
+        !((is_cnv(add->src[1]) && is_y(add->src[0])) || (is_cnv(add->src[0]) && is_y(add->src[1]))) ||
+        sc->src[0] != add || ((const float *) sc->op_params)[1] != 0.0f || !ggml_is_contiguous(sc) || ggml_nelements(sc) != C) {
+        return false;
+    }
+
+    if (nops == 6) {
+        const ggml_tensor * ra  = n[5];
+        const ggml_tensor * res = ra->src[0];
+        if (ra->src[1] != sc || res->type != GGML_TYPE_F32 || !ggml_is_contiguous(res) || ggml_nelements(res) != C ||
+            ra->type != GGML_TYPE_F32 || !ggml_is_contiguous(ra)) {
+            return false;
+        }
+    }
+
+    return ggml_get_op_params_i32(cat, 0) == 0 && cat->type == GGML_TYPE_F32 && cat->ne[0] == K && cat->ne[1] == C && cat->ne[2] == 1 &&
+        past->type == GGML_TYPE_F32 && past->nb[0] == sizeof(float) && past->ne[0] == K - 1 && past->ne[1] == C && past->ne[2] == 1 &&
+        cw->type == GGML_TYPE_F32 && ggml_is_contiguous(cw) && cw->ne[1] == C && K <= 8 &&
+        cnv->src[0] == cat && cnv->ne[1] == 1 && cnv->ne[2] == 1 &&
+        cs->view_src == cat && cs->view_offs == (size_t) (K - Ks)*sizeof(float) && cs->nb[1] == cat->nb[1] && cs->ne[1] == C && Ks <= K &&
+        cd->type == GGML_TYPE_F32 && ggml_is_contiguous(cd) && ggml_nelements(cd) == Ks*C && ggml_nelements(cs) == Ks*C;
+}
+
+// raw sequences, views included, so the alloc deps keep the kernel inputs alive to the fused output
+#define V GGML_OP_VIEW
+static const std::vector<ggml_op> ops_conv_tail = {
+    GGML_OP_CONCAT, V, V, GGML_OP_CPY, GGML_OP_SSM_CONV, GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_SCALE
+};
+static const std::vector<ggml_op> ops_conv_tail_res = {
+    GGML_OP_CONCAT, V, V, GGML_OP_CPY, GGML_OP_SSM_CONV, GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_SCALE, GGML_OP_ADD
+};
+#undef V
 
 static const std::vector<ggml_op> ops_loop_ctrl = {
     GGML_OP_MUL_MAT, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_SUB, GGML_OP_MUL_MAT, GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_ADD
@@ -1243,6 +1353,9 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
 
     { GGML_METAL_FUSION_MIX, ops_mix,     {}, true, ggml_metal_fusion_check_mix },
     { GGML_METAL_FUSION_MIX, ops_mix_rep, {}, true, ggml_metal_fusion_check_mix },
+
+    { GGML_METAL_FUSION_CONV_TAIL, ops_conv_tail,      {}, true, ggml_metal_fusion_check_conv_tail },
+    { GGML_METAL_FUSION_CONV_TAIL, ops_conv_tail_res,  {}, true, ggml_metal_fusion_check_conv_tail },
 };
 
 // ---- alloc deps -----------------------------------------------------------
@@ -1269,6 +1382,12 @@ static void ggml_metal_fusion_add_pattern_alloc_deps(
         const ggml_metal_fusion * fusion,
         int node_idx) {
     const int last_node = node_idx + (int) fusion->ops_all.size() - 1;
+
+    // conv_tail needs none: every graph input is read per channel by the thread that writes that channel, so an
+    // output placed over an input cannot race (its deps also broke the allocation of the nested patterns)
+    if (fusion->id == GGML_METAL_FUSION_CONV_TAIL) {
+        return;
+    }
 
     // keep all external inputs alive until the fused output
     std::set<ggml_tensor *> seen;

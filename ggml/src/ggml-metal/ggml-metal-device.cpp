@@ -2536,6 +2536,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mix(ggml_metal_l
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_tail(ggml_metal_library_t lib) {
+    const char * name = "kernel_conv_tail_f32";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+    }
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_loop_ctrl(ggml_metal_library_t lib, enum ggml_type type) {
     const char * name = type == GGML_TYPE_F16 ? "kernel_loop_ctrl_f16" : "kernel_loop_ctrl_f32";
 

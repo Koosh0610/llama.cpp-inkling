@@ -98,6 +98,7 @@ int ggml_metal_op_l2_clip_fused     (ggml_metal_op_t ctx, int idx, int n);
 int ggml_metal_op_situ_fused        (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_loop_ctrl_fused   (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_mix_fused         (ggml_metal_op_t ctx, int idx, int n_fuse);
+int ggml_metal_op_conv_tail_fused   (ggml_metal_op_t ctx, int idx, int n_fuse);
 int ggml_metal_op_conv_res_fused    (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_upscale           (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_pad               (ggml_metal_op_t ctx, int idx);
