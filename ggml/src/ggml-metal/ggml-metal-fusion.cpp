@@ -1288,23 +1288,12 @@ void ggml_metal_fusion_add_alloc_deps(
         void * user_data,
         void (*add_alloc_dep)(void *, ggml_tensor *, ggml_tensor *),
         ggml_cgraph * gf) {
+    // every matching pattern, nested ones included: which one fuses is decided later, and extra deps only extend lifetimes
     for (int i = 0; i < gf->n_nodes; ++i) {
-        const ggml_metal_fusion * best = nullptr;
-        int best_raw = 0;
-
         for (const ggml_metal_fusion & fusion : ggml_metal_fusions) {
-            if ((int) fusion.ops_all.size() <= best_raw) {
-                continue;
-            }
             if (ggml_metal_fusion_match_raw_pattern(gf, i, fusion.ops_all)) {
-                best = &fusion;
-                best_raw = (int) fusion.ops_all.size();
+                ggml_metal_fusion_add_pattern_alloc_deps(user_data, add_alloc_dep, gf, &fusion, i);
             }
-        }
-
-        if (best) {
-            ggml_metal_fusion_add_pattern_alloc_deps(user_data, add_alloc_dep, gf, best, i);
-            i += best_raw - 1;
         }
     }
 }
