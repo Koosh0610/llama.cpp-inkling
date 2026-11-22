@@ -808,6 +808,9 @@ public:
     ggml_tensor * self_rel_pos     = nullptr; // I32 [n_kv,     n_batch]
     ggml_tensor * self_rel_pos_swa = nullptr; // I32 [n_kv_swa, n_batch]
 
+    // the masks cast to F32 once per graph, shared by the layers: [full, swa]
+    ggml_tensor * self_kq_mask_f32[2] = {nullptr, nullptr};
+
     const uint32_t extent;
     const uint32_t extent_swa;
 
