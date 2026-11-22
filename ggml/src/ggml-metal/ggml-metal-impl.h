@@ -775,6 +775,20 @@ typedef struct {
 } ggml_metal_kargs_conv_tail;
 
 typedef struct {
+    int32_t  H;      // heads
+    int32_t  NR;     // relative dims
+    int32_t  NKV;
+    int32_t  T;
+    uint64_t nbtab1; // bias table position stride
+    uint64_t nbr1;   // r head stride
+    uint64_t nbr2;   // r token stride
+    uint64_t nbs1;   // sink head stride
+    uint64_t nbs2;   // sink token stride
+    uint64_t nbp1;   // rel_pos token stride
+    uint64_t nbm1;   // mask token stride
+} ggml_metal_kargs_rel_bias;
+
+typedef struct {
     int32_t  IC;
     int32_t  IH;
     int32_t  IW;

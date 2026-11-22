@@ -176,6 +176,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_situ     
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_res          (ggml_metal_library_t lib);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mix(ggml_metal_library_t lib);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_tail(ggml_metal_library_t lib);
+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rel_bias(ggml_metal_library_t lib);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_loop_ctrl         (ggml_metal_library_t lib, enum ggml_type type);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_2d           (ggml_metal_library_t lib, const struct ggml_tensor * op);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_2d_mm        (ggml_metal_library_t lib, const struct ggml_tensor * op);

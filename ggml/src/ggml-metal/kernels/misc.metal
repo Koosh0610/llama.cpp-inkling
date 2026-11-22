@@ -725,6 +725,42 @@ kernel void kernel_conv_tail_f32(
     }
 }
 
+// mask with the relative-position bias per head: dst[j, t, h] = (dot(r[:, h, t], tab[:, pos[j, t]]) - sink[h, t]) + mask[j, t]
+kernel void kernel_rel_bias_f32(
+        constant ggml_metal_kargs_rel_bias & args,
+        device const char  * tab,
+        device const char  * r,
+        device const char  * sink,
+        device const char  * pos,
+        device const char  * mask,
+        device       half  * dst,
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort3 tpitg [[thread_position_in_threadgroup]],
+        ushort3 ntg   [[threads_per_threadgroup]]) {
+    const int h = tgpig.x;
+    const int t = tgpig.y;
+
+    float rv[32];
+    device const float * rh = (device const float *) (r + h*args.nbr1 + t*args.nbr2);
+    for (int i = 0; i < args.NR; ++i) {
+        rv[i] = rh[i];
+    }
+    const float sv = *((device const float *) (sink + h*args.nbs1 + t*args.nbs2));
+
+    device const int32_t * pt = (device const int32_t *) (pos  + t*args.nbp1);
+    device const float   * mt = (device const float   *) (mask + t*args.nbm1);
+    device       half    * dt = dst + ((int64_t) h*args.T + t)*args.NKV;
+
+    for (int j = tpitg.x; j < args.NKV; j += ntg.x) {
+        device const float * row = (device const float *) (tab + pt[j]*args.nbtab1);
+        float b = 0.0f;
+        for (int i = 0; i < args.NR; ++i) {
+            b += rv[i]*row[i];
+        }
+        dt[j] = (half) ((b - sv) + mt[j]);
+    }
+}
+
 // y = b*tanh(g/b)*sigmoid(g) * lb*tanh(u/lb); g, u strided views with contiguous rows, y contiguous
 kernel void kernel_situ_f32(
         constant ggml_metal_kargs_situ & args,

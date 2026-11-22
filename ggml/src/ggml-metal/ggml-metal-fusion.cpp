@@ -1108,6 +1108,55 @@ static bool ggml_metal_fusion_check_conv_tail(
         cd->type == GGML_TYPE_F32 && ggml_is_contiguous(cd) && ggml_nelements(cd) == Ks*C && ggml_nelements(cs) == Ks*C;
 }
 
+// table = mul_mat(tab, r) | sub(., sink) | cont(permute) | get_rows(., pos) | cont(permute) | add(., mask) | cpy(F16)
+static bool ggml_metal_fusion_check_rel_bias(
+        const ggml_metal_fusion       * fusion,
+        const ggml_tensor * const     * n,
+        const ggml_cgraph             * gf,
+        const int                     * node_idxs,
+              int                       idx,
+              ggml_metal_fusion_mode    mode) {
+    GGML_UNUSED(mode);
+    GGML_UNUSED(fusion);
+
+    if (getenv("GGML_METAL_NO_REL_BIAS")) {
+        return false;
+    }
+
+    if (!ggml_metal_fusion_raw_span_inputs_ok(gf, node_idxs, idx, 7, -1)) {
+        return false;
+    }
+
+    const ggml_tensor * mm  = n[0];
+    const ggml_tensor * sub = n[1];
+    const ggml_tensor * c0  = n[2];
+    const ggml_tensor * gr  = n[3];
+    const ggml_tensor * c1  = n[4];
+    const ggml_tensor * add = n[5];
+    const ggml_tensor * out = n[6];
+
+    const ggml_tensor * tab  = mm->src[0];
+    const ggml_tensor * r    = mm->src[1];
+    const ggml_tensor * sink = sub->src[1];
+    const ggml_tensor * pos  = gr->src[1];
+    const ggml_tensor * mask = add->src[0] == c1 ? add->src[1] : add->src[0];
+
+    const int64_t NR  = tab->ne[0];
+    const int64_t H   = r->ne[1];
+    const int64_t T   = r->ne[2];
+    const int64_t NKV = out->ne[0];
+
+    return tab->type == GGML_TYPE_F32 && tab->nb[0] == sizeof(float) && tab->ne[2] == 1 &&
+        r->type == GGML_TYPE_F32 && r->nb[0] == sizeof(float) && r->ne[0] == NR && r->ne[3] == 1 && NR <= 32 &&
+        sub->src[0] == mm && sink->type == GGML_TYPE_F32 && sink->ne[0] == 1 && sink->ne[1] == H && sink->ne[2] == T &&
+        ggml_metal_fusion_view_base(c0->src[0]) == sub && gr->src[0] == c0 &&
+        pos->type == GGML_TYPE_I32 && pos->nb[0] == sizeof(int32_t) && pos->ne[0] == NKV && pos->ne[1] == T && pos->ne[2] == 1 &&
+        ggml_metal_fusion_view_base(c1->src[0]) == gr && c1->ne[0] == NKV && c1->ne[1] == T && c1->ne[2] == H && c1->ne[3] == 1 &&
+        add->src[0] == c1 &&
+        mask->type == GGML_TYPE_F32 && mask->nb[0] == sizeof(float) && mask->ne[0] == NKV && mask->ne[1] == T && mask->ne[2] == 1 && mask->ne[3] == 1 &&
+        out->src[0] == add && out->type == GGML_TYPE_F16 && ggml_is_contiguous(out) && ggml_are_same_shape(out, c1);
+}
+
 // raw sequences, views included, so the alloc deps keep the kernel inputs alive to the fused output
 #define V GGML_OP_VIEW
 static const std::vector<ggml_op> ops_conv_tail = {
@@ -1115,6 +1164,10 @@ static const std::vector<ggml_op> ops_conv_tail = {
 };
 static const std::vector<ggml_op> ops_conv_tail_res = {
     GGML_OP_CONCAT, V, V, GGML_OP_CPY, GGML_OP_SSM_CONV, GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_SCALE, GGML_OP_ADD
+};
+static const std::vector<ggml_op> ops_rel_bias = {
+    GGML_OP_MUL_MAT, GGML_OP_RESHAPE, GGML_OP_SUB, GGML_OP_PERMUTE, GGML_OP_CONT, GGML_OP_GET_ROWS,
+    GGML_OP_RESHAPE, GGML_OP_PERMUTE, GGML_OP_CONT, GGML_OP_ADD, GGML_OP_CPY
 };
 #undef V
 
@@ -1356,6 +1409,8 @@ static const std::vector<ggml_metal_fusion> ggml_metal_fusions = {
 
     { GGML_METAL_FUSION_CONV_TAIL, ops_conv_tail,      {}, true, ggml_metal_fusion_check_conv_tail },
     { GGML_METAL_FUSION_CONV_TAIL, ops_conv_tail_res,  {}, true, ggml_metal_fusion_check_conv_tail },
+
+    { GGML_METAL_FUSION_REL_BIAS, ops_rel_bias, {}, true, ggml_metal_fusion_check_rel_bias },
 };
 
 // ---- alloc deps -----------------------------------------------------------
@@ -1386,6 +1441,29 @@ static void ggml_metal_fusion_add_pattern_alloc_deps(
     // conv_tail needs none: every graph input is read per channel by the thread that writes that channel, so an
     // output placed over an input cannot race (its deps also broke the allocation of the nested patterns)
     if (fusion->id == GGML_METAL_FUSION_CONV_TAIL) {
+        return;
+    }
+
+    // rel_bias keeps the base tensors of its external inputs
+    if (fusion->id == GGML_METAL_FUSION_REL_BIAS) {
+        std::set<ggml_tensor *> inner;
+        for (int j = 0; j < (int) fusion->ops_all.size(); ++j) {
+            inner.insert(gf->nodes[node_idx + j]);
+        }
+        std::set<ggml_tensor *> kept;
+        for (int j = 0; j < (int) fusion->ops_all.size(); ++j) {
+            ggml_tensor * node = gf->nodes[node_idx + j];
+            for (int s = 0; s < GGML_MAX_SRC; ++s) {
+                ggml_tensor * src = node->src[s];
+                while (src && src->view_src) {
+                    src = src->view_src;
+                }
+                // graph intermediates only: weights, inputs and caches are never reused by the allocator
+                if (src && src->op != GGML_OP_NONE && !inner.count(src) && kept.insert(src).second) {
+                    add_alloc_dep(user_data, src, gf->nodes[last_node]);
+                }
+            }
+        }
         return;
     }
 

@@ -2815,6 +2815,10 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
     if (ctx->use_fusion()) {
         int n = 1;
         const ggml_metal_fusion * fusion = ctx->can_fuse(idx, GGML_METAL_FUSION_FULL, &n);
+        if (fusion && ggml_metal_fusion_get_id(fusion) == GGML_METAL_FUSION_REL_BIAS) {
+            ctx->count_fusions(fusion);
+            return ggml_metal_op_rel_bias_fused(ctx, idx, n);
+        }
         if (fusion && ggml_metal_fusion_get_id(fusion) == GGML_METAL_FUSION_LOOP_CTRL) {
             ctx->count_fusions(fusion);
             return ggml_metal_op_loop_ctrl_fused(ctx, idx);
@@ -5607,6 +5611,61 @@ int ggml_metal_op_conv_tail_fused(ggml_metal_op_t ctx, int idx, int n_fuse) {
 
     const int nth = MIN(256, args.C);
     ggml_metal_encoder_dispatch_threadgroups(enc, (args.C + nth - 1)/nth, 1, 1, nth, 1, 1);
+
+    return n_fuse;
+}
+
+int ggml_metal_op_rel_bias_fused(ggml_metal_op_t ctx, int idx, int n_fuse) {
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    const ggml_tensor * mm  = ctx->node(idx + 0);
+    const ggml_tensor * sub = ctx->node(idx + 1);
+    const ggml_tensor * gr  = ctx->node(idx + 3);
+    const ggml_tensor * c1  = ctx->node(idx + 4);
+    const ggml_tensor * add = ctx->node(idx + 5);
+    ggml_tensor       * dst = ctx->node(idx + n_fuse - 1);
+
+    for (int i = 1; i < n_fuse; ++i) {
+        if (!ggml_metal_op_concurrency_check(ctx, ctx->node(idx + i))) {
+            ggml_metal_op_concurrency_reset(ctx);
+            break;
+        }
+    }
+
+    const ggml_tensor * tab  = mm->src[0];
+    const ggml_tensor * r    = mm->src[1];
+    const ggml_tensor * sink = sub->src[1];
+    const ggml_tensor * pos  = gr->src[1];
+    const ggml_tensor * mask = add->src[0] == c1 ? add->src[1] : add->src[0];
+
+    ggml_metal_kargs_rel_bias args = {
+        /*.H      =*/ (int32_t) r->ne[1],
+        /*.NR     =*/ (int32_t) r->ne[0],
+        /*.NKV    =*/ (int32_t) dst->ne[0],
+        /*.T      =*/ (int32_t) r->ne[2],
+        /*.nbtab1 =*/ tab->nb[1],
+        /*.nbr1   =*/ r->nb[1],
+        /*.nbr2   =*/ r->nb[2],
+        /*.nbs1   =*/ sink->nb[1],
+        /*.nbs2   =*/ sink->nb[2],
+        /*.nbp1   =*/ pos->nb[1],
+        /*.nbm1   =*/ mask->nb[1],
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_rel_bias(lib);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(tab),  1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(r),    2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(sink), 3);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(pos),  4);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(mask), 5);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(dst),  6);
+
+    const int nth = MIN(256, ((args.NKV + 31)/32)*32);
+    ggml_metal_encoder_dispatch_threadgroups(enc, args.H, args.T, 1, nth, 1, 1);
 
     return n_fuse;
 }

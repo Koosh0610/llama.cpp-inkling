@@ -49,6 +49,7 @@ typedef enum ggml_metal_fusion_id {
     GGML_METAL_FUSION_CONV_RES,     // CPY (conv state store) + SSM_CONV + ADD (residual) + SCALE
     GGML_METAL_FUSION_MIX,          // depth mix of one token: rms_norm(cur), stack with cached normed states, softmax-weighted sum
     GGML_METAL_FUSION_CONV_TAIL,    // [expert sum] + CONCAT + conv state CPY + SSM_CONV + ADD + SCALE + [ADD residual], one token
+    GGML_METAL_FUSION_REL_BIAS,     // relative-position bias table gather + sink + mask, to the F16 flash-attention mask
 } ggml_metal_fusion_id;
 
 struct ggml_metal_fusion; // defined in ggml-metal-fusion.cpp
