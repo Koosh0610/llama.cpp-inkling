@@ -1381,6 +1381,19 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
     std::vector<float>     context_embd;
     std::vector<llama_pos> context_pos;
 
+    // gate: after tries that lost steps, skip drafting for a while (32 doubling to 256 tokens)
+    bool gate = true;
+    std::vector<int32_t> skip_left;
+    std::vector<int32_t> backoff;
+    std::vector<float>   credit;   // steps gained by recent tries, capped
+    std::vector<int32_t> last_len; // tokens of the try awaiting accept
+
+    // cost of a try beyond the plain step it replaces, in steps (M5: verify of n tokens ~ 0.92 + 0.32 n steps)
+    // ponytail: fixed constants, measure per machine and Markov step count if the gate misjudges
+    float draft_cost  = 0.85f; // drafter pass, 7 Markov steps
+    float verify_cost = 0.24f;
+    float token_cost  = 0.32f;
+
     common_speculative_impl_draft_dspark(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl_draft_dflash(params, n_seq, COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK)
     {
@@ -1395,11 +1408,12 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
 
         has_rnn_context = llama_model_dflash_variant(model_dft) == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2;
 
-        if (this->params.p_min > 0.0f) {
+        // Inkling2 has no confidence head: p_min applies to the drafted token's softmax probability instead
+        if (this->params.p_min > 0.0f && !has_rnn_context) {
             char buf[16] = {};
-            const bool has_conf = !has_rnn_context &&
-                (llama_model_meta_val_str(model_dft, "dflash.has_confidence_head", buf, sizeof(buf)) < 0 ||
-                 std::strcmp(buf, "true") == 0);
+            const bool has_conf =
+                llama_model_meta_val_str(model_dft, "dflash.has_confidence_head", buf, sizeof(buf)) < 0 ||
+                std::strcmp(buf, "true") == 0;
             if (!has_conf) {
                 throw std::runtime_error("DSpark draft has no confidence head: please set --spec-draft-p-min 0");
             }
@@ -1420,6 +1434,18 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
         }
 
         LOG_INF("%s: - sample_from_anchor=%s\n", __func__, sample_from_anchor ? "true" : "false");
+
+        if (const char * e = getenv("LLAMA_DSPARK_GATE")) {
+            gate = atoi(e) != 0;
+        }
+        // each Markov step reads the target's output head (~2.5 ms), the rest of the pass ~11 ms
+        if (const char * e = getenv("LLAMA_DSPARK_MARKOV_STEPS")) {
+            draft_cost = 0.33f + 0.075f * std::min(atoi(e), block_size - 1);
+        }
+        skip_left.assign(n_seq, 0);
+        backoff.assign(n_seq, 32);
+        credit.assign(n_seq, 0.0f);
+        last_len.assign(n_seq, 0);
 
         // anchor-first DSpark yields a full block_size draft tokens
         // the recurrent head reads the context features back from h_nextn after a host copy injection
@@ -1467,6 +1493,38 @@ protected:
 
 public:
 
+    void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+        common_speculative_impl_draft_dflash::begin(seq_id, prompt);
+        skip_left[seq_id] = 0;
+        backoff[seq_id]   = 32;
+        credit[seq_id]    = 0.0f;
+        last_len[seq_id]  = 0;
+    }
+
+    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) override {
+        if (is_other || last_len[seq_id] == 0) {
+            return;
+        }
+        const float gain = n_accepted - (draft_cost + verify_cost + token_cost * last_len[seq_id]);
+        last_len[seq_id] = 0;
+        judge(seq_id, gain);
+    }
+
+    void judge(llama_seq_id seq_id, float gain) {
+        if (!gate) {
+            return;
+        }
+        credit[seq_id] = std::min(credit[seq_id] + gain, 2.0f);
+        if (gain > 0.0f) {
+            backoff[seq_id] = 32;
+        }
+        if (credit[seq_id] < 0.0f) {
+            skip_left[seq_id] = backoff[seq_id];
+            backoff[seq_id]   = std::min(backoff[seq_id] * 2, 256);
+            credit[seq_id]    = 0.0f;
+        }
+    }
+
     void draft(common_speculative_draft_params_vec & dparams) override {
         auto & ctx_dft = params.ctx_dft;
 
@@ -1481,6 +1539,10 @@ public:
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
             if (!dp.drafting) {
+                continue;
+            }
+            if (gate && skip_left[seq_id] > 0) {
+                skip_left[seq_id]--;
                 continue;
             }
 
@@ -1529,12 +1591,16 @@ public:
             auto & result = *dp.result;
 
             // DSpark: read from the first draft slot, truncate below the confidence threshold
-            const float * conf = params.p_min > 0.0f ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
+            const float * conf = params.p_min > 0.0f && !has_rnn_context ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
             // bonus-anchor drafts read the mask positions only, like DFlash
             for (int32_t i = i_draft_beg; i < i_draft_beg + params.n_max; ++i) {
                 const int32_t idx = beg + i;
 
                 if (conf && conf[(size_t) idx * n_embd_dec] < params.p_min) {
+                    break;
+                }
+
+                if (has_rnn_context && params.p_min > 0.0f && draft_prob(idx) < params.p_min) {
                     break;
                 }
 
@@ -1564,7 +1630,24 @@ public:
             if (result.size() < (size_t) params.n_min) {
                 result.clear();
             }
+            last_len[seq_id] = (int32_t) result.size();
+            if (result.empty()) {
+                judge(seq_id, -draft_cost); // the drafter ran for nothing
+            }
         }
+    }
+
+private:
+    // softmax probability of the greedy token at output row idx
+    float draft_prob(int32_t idx) const {
+        const float * l = llama_get_logits_ith(params.ctx_dft, idx);
+        const int n = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(params.ctx_dft)));
+        const float mx = *std::max_element(l, l + n);
+        float sum = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            sum += expf(l[i] - mx);
+        }
+        return 1.0f / sum;
     }
 };
 
